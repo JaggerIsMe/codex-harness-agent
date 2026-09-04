@@ -16,7 +16,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.http.HttpHeaders;
-import org.springframework.util.concurrent.ListenableFuture;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketHttpHeaders;
@@ -27,6 +26,7 @@ import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.net.URI;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -97,15 +97,23 @@ public class AgentServerConnection extends AbstractWebSocketHandler implements S
         headers.set("X-Harness-Device-Code", identity.getDeviceCode());
         headers.set("X-Harness-Protocol-Version", ProtocolEnvelope.CURRENT_VERSION);
         try {
-            ListenableFuture<WebSocketSession> future = webSocketClient.doHandshake(this, headers, properties.getServerUrl());
-            future.addCallback(ignored -> { }, failure -> scheduleReconnect("Connection failed"));
+            CompletableFuture<WebSocketSession> future = webSocketClient.execute(this, headers, properties.getServerUrl());
+            future.whenComplete((connected, failure) -> {
+                if (failure != null) {
+                    scheduleReconnect("Connection failed");
+                }
+            });
         } catch (RuntimeException exception) {
             scheduleReconnect("Connection failed");
         }
     }
 
     @Override
-    public void afterConnectionEstablished(WebSocketSession established) {
+    public synchronized void afterConnectionEstablished(WebSocketSession established) {
+        if (!running) {
+            closeQuietly(established);
+            return;
+        }
         WebSocketSession previous = session.getAndSet(established);
         if (previous != null && previous != established) {
             closeQuietly(previous);

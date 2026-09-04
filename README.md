@@ -21,7 +21,7 @@ Harness Agent 运行在目标电脑上，通过主动 WSS 连接接受 Harness S
 
 ## 前置条件
 
-- Java 8 或更高版本。
+- Java 21，构建使用 Maven 3.6.3+。Spring Boot 3.5.16；主代码与测试的编译目标均为 21，不再支持 Java 8 运行。
 - Windows 11（推荐），或 Windows 10 1809+（Codex 官方标注为 best-effort）。无需 Docker Desktop 或 WSL2。
 - 目标用户已安装 `codex`，且 `codex app-server --stdio` 可运行。
 - 目标用户已在本机完成 Codex 登录；Harness Server 不接触 Codex 凭证。
@@ -87,12 +87,19 @@ harness:
 ## 验证与启动
 
 ```powershell
-mvn test
-mvn -DskipTests package
+java -version
+mvn -version
+mvn clean verify
 java -jar target/harness-agent-1.0.0-SNAPSHOT.jar
 ```
 
 测试覆盖协议校验、命令去重、会话并发、工作区逃逸和 Skill 安装安全校验。
+
+Agent 不访问数据库，因此不引入 MyBatis、MySQL 或 Redis 客户端。WebSocket 连接使用 Spring 6 的 `execute` / `CompletableFuture` API；Jakarta 校验与关闭清理已适配。继续使用非 Web 进程保活和现有线程模型，未启用虚拟线程。
+
+测试 JVM 的 Mockito agent 和模块内临时目录由 POM 配置，不必额外传 `argLine`。IDE、Maven Runner 和运行 Agent 的服务/终端须统一使用 JDK 21；旧的全局 `jdk-1.8` Maven profile 需在本机设置中调整。
+
+2026-09-04 升级验证：`mvn clean verify '-Dcodex.smoke=true'` 通过，40 项测试成功、1 项符号链接能力测试按环境条件跳过。包含真实 Codex 初始化/建会话（不发送模型请求）、Jakarta 校验、异步重连、关闭后迟到握手和进程树清理测试。升级验证发现并修复了 Windows `.cmd` 包装进程退出后子进程遗留的问题：先关闭 stdin，再等待并清理该 Agent 自己启动的进程树。可执行 JAR 已生成，入口字节码 major version 为 65（Java 21）。
 
 ## 新建会话失败排查
 

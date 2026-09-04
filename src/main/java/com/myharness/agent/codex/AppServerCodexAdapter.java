@@ -13,7 +13,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
-import javax.annotation.PreDestroy;
+import jakarta.annotation.PreDestroy;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.IOException;
@@ -209,9 +209,8 @@ public class AppServerCodexAdapter implements CodexGateway {
                 Process failed = process;
                 process = null;
                 writer = null;
-                if (failed != null) {
-                    failed.destroyForcibly();
-                }
+                closing = true;
+                stopProcessTree(failed);
                 throw exception;
             }
         }
@@ -501,17 +500,7 @@ public class AppServerCodexAdapter implements CodexGateway {
         Process current = process;
         process = null;
         writer = null;
-        if (current != null) {
-            current.destroy();
-            try {
-                if (!current.waitFor(3, TimeUnit.SECONDS)) {
-                    current.destroyForcibly();
-                }
-            } catch (InterruptedException exception) {
-                Thread.currentThread().interrupt();
-                current.destroyForcibly();
-            }
-        }
+        stopProcessTree(current);
         CodexException closed = new CodexException("Codex App Server was stopped");
         for (CompletableFuture<JsonNode> future : pendingRequests.values()) {
             future.completeExceptionally(closed);
@@ -522,6 +511,45 @@ public class AppServerCodexAdapter implements CodexGateway {
         pendingApprovals.clear();
         messagePhasesByItem.clear();
         threadWorkspaces.clear();
+    }
+
+    private void stopProcessTree(Process current) {
+        if (current == null) {
+            return;
+        }
+        // Capture ownership before the wrapper exits; Windows .cmd launchers have multiple descendants.
+        List<ProcessHandle> owned = new ArrayList<>(current.descendants().toList());
+        owned.add(current.toHandle());
+        boolean interrupted = false;
+        try {
+            try {
+                current.getOutputStream().close();
+            } catch (IOException ignored) {
+                // Already closed after startup failure or a remote exit.
+            }
+            current.waitFor(3, TimeUnit.SECONDS);
+        } catch (InterruptedException exception) {
+            interrupted = true;
+        } finally {
+            for (ProcessHandle handle : owned) {
+                if (handle.isAlive()) {
+                    handle.destroyForcibly();
+                }
+            }
+        }
+        try {
+            CompletableFuture<?>[] exits = owned.stream().map(ProcessHandle::onExit)
+                    .toArray(CompletableFuture<?>[]::new);
+            CompletableFuture.allOf(exits).get(3, TimeUnit.SECONDS);
+        } catch (InterruptedException exception) {
+            interrupted = true;
+        } catch (ExecutionException | TimeoutException exception) {
+            LOGGER.warn("Timed out waiting for owned Codex processes to exit");
+        } finally {
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     private String toCodexDecision(ApprovalDecision decision) {

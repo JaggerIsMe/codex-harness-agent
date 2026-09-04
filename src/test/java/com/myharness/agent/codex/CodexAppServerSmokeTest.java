@@ -8,12 +8,15 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -27,12 +30,31 @@ class CodexAppServerSmokeTest {
         AgentProperties properties = new AgentProperties();
         properties.setCodexRequestTimeoutSeconds(15);
         AppServerCodexAdapter adapter = new AppServerCodexAdapter(properties, new ObjectMapper());
+        List<ProcessHandle> ownedProcesses = new ArrayList<>();
         try {
             String threadId = adapter.startThread(new CodexThreadOptions("smoke-project", workspace, null));
             assertNotNull(threadId);
             assertTrue(!threadId.trim().isEmpty());
+            Process started = (Process) ReflectionTestUtils.getField(adapter, "process");
+            assertNotNull(started);
+            ownedProcesses.addAll(started.descendants().toList());
+            ownedProcesses.add(started.toHandle());
+            adapter.close();
+            List<Long> alive = ownedProcesses.stream().filter(ProcessHandle::isAlive).map(ProcessHandle::pid).toList();
+            assertTrue(alive.isEmpty(), "Adapter close left its own processes running: " + alive);
         } finally {
             adapter.close();
+            // Cleanup is limited to handles captured from this test's own process tree, even when the assertion fails.
+            for (ProcessHandle handle : ownedProcesses) {
+                if (handle.isAlive()) {
+                    handle.destroyForcibly();
+                    try {
+                        handle.onExit().get(5, TimeUnit.SECONDS);
+                    } catch (Exception ignored) {
+                        // The lifecycle assertion above reports the failure; JUnit still checks workspace cleanup.
+                    }
+                }
+            }
         }
     }
 

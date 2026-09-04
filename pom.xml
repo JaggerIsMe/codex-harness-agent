@@ -7,7 +7,7 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>2.6.1</version>
+        <version>3.5.16</version>
         <relativePath/>
     </parent>
 
@@ -18,9 +18,10 @@
     <description>Harness agent for controlled Codex execution on a target computer</description>
 
     <properties>
-        <java.version>1.8</java.version>
-        <maven.compiler.release>8</maven.compiler.release>
-        <maven.compiler.testRelease>8</maven.compiler.testRelease>
+        <java.version>21</java.version>
+        <maven.compiler.release>21</maven.compiler.release>
+        <maven.compiler.testRelease>21</maven.compiler.testRelease>
+        <maven.compiler.proc>full</maven.compiler.proc>
     </properties>
 
     <dependencies>
@@ -57,6 +58,32 @@
     <build>
         <plugins>
             <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>test-agent-path</id>
+                        <goals><goal>properties</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>require-build-runtime</id>
+                        <goals><goal>enforce</goal></goals>
+                        <configuration>
+                            <rules>
+                                <requireJavaVersion><version>[21,22)</version></requireJavaVersion>
+                                <requireMavenVersion><version>[3.6.3,)</version></requireMavenVersion>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
             </plugin>
@@ -64,9 +91,8 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
-                    <systemPropertyVariables>
-                        <java.io.tmpdir>${project.build.directory}</java.io.tmpdir>
-                    </systemPropertyVariables>
+                    <!-- Set at JVM startup: changing java.io.tmpdir after startup does not relocate NIO temp files. -->
+                    <argLine>-javaagent:"${org.mockito:mockito-core:jar}" -Djava.io.tmpdir="${project.build.directory}"</argLine>
                 </configuration>
             </plugin>
         </plugins>
