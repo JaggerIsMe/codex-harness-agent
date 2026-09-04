@@ -64,6 +64,7 @@ class AgentApplicationTest {
         command.add(System.getProperty("java.class.path"));
         command.add(AgentApplication.class.getName());
         command.add("--spring.main.banner-mode=off");
+        command.add("--project.folder=" + dataDirectory.toAbsolutePath());
         command.add("--harness.agent.server-url=ws://127.0.0.1:" + serverPort + "/ws/agent");
         command.add("--harness.agent.device-code=test-device");
         command.add("--harness.agent.device-token=test-token");

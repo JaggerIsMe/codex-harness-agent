@@ -272,10 +272,18 @@ public class AgentSessionManager {
             }
             reserveProjectRoot(command.getProjectId(), workspace);
             try {
-                codexGateway.resumeThread(command.getCodexThreadId(),
-                        new CodexThreadOptions(command.getProjectId(), workspace, command.getModel()));
+                String restoredThreadId = command.getCodexThreadId();
+                var options = new CodexThreadOptions(command.getProjectId(), workspace, command.getModel());
+                try { codexGateway.resumeThread(restoredThreadId, options); }
+                catch (CodexThreadNotLoadedException missing) {
+                    if (!command.isRecreateUnstartedThread()) throw missing;
+                    restoredThreadId = codexGateway.startThread(options);
+                    eventBus.publish(new AgentEvent(AgentEventType.THREAD_STARTED, command.getConversationId(),
+                            new ThreadStartedEventDTO(command.getConversationId(), restoredThreadId,
+                                    command.getCodexThreadId(), command.getTurnId())));
+                }
                 SessionContext restored = new SessionContext(command.getProjectId(), command.getConversationId(),
-                        command.getCodexThreadId(), workspace);
+                        restoredThreadId, workspace);
                 sessions.put(command.getConversationId(), restored);
                 return restored;
             } catch (RuntimeException exception) {

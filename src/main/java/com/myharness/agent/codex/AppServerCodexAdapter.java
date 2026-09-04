@@ -67,12 +67,13 @@ public class AppServerCodexAdapter implements CodexGateway {
         ObjectNode params = objectMapper.createObjectNode();
         params.put("cwd", options.getWorkspace().toString());
         params.put("approvalPolicy", "never");
-        params.put("sandbox", "workspace-write");
+        configureProjectPermissions(params, options.getWorkspace());
         params.put("ephemeral", false);
         if (hasText(options.getModel())) {
             params.put("model", options.getModel().trim());
         }
         JsonNode result = request("thread/start", params);
+        verifyPermissionProfile(result,options.getWorkspace());
         String threadId = requiredText(result.path("thread"), "id", "thread/start response");
         threadWorkspaces.put(threadId, options.getWorkspace());
         return threadId;
@@ -89,7 +90,14 @@ public class AppServerCodexAdapter implements CodexGateway {
         }
         // Verify the persisted root before applying overrides: resume must not move another project's history.
         ObjectNode read = objectMapper.createObjectNode().put("threadId", threadId).put("includeTurns", false);
-        JsonNode stored = request("thread/read", read).path("thread");
+        JsonNode stored;
+        try { stored = request("thread/read", read).path("thread"); }
+        catch (CodexException failure) {
+            Throwable detail = failure.getCause();
+            if (detail != null && ("thread not loaded: " + threadId).equals(detail.getMessage()))
+                throw new CodexThreadNotLoadedException(threadId, failure);
+            throw failure;
+        }
         verifyThreadBinding(stored, threadId, options.getWorkspace());
         if ("active".equals(stored.path("status").path("type").asText())) {
             throw new CodexException("Cannot resume a Codex thread with an active Turn");
@@ -98,9 +106,11 @@ public class AppServerCodexAdapter implements CodexGateway {
         params.put("threadId", threadId);
         params.put("cwd", options.getWorkspace().toString());
         params.put("approvalPolicy", "never");
-        params.put("sandbox", "workspace-write");
+        configureProjectPermissions(params, options.getWorkspace());
         if (hasText(options.getModel())) params.put("model", options.getModel().trim());
-        JsonNode resumed = request("thread/resume", params).path("thread");
+        JsonNode resumeResult = request("thread/resume", params);
+        verifyPermissionProfile(resumeResult,options.getWorkspace());
+        JsonNode resumed = resumeResult.path("thread");
         verifyThreadBinding(resumed, threadId, options.getWorkspace());
         threadWorkspaces.put(threadId, options.getWorkspace());
     }
@@ -116,6 +126,35 @@ public class AppServerCodexAdapter implements CodexGateway {
             }
         } catch (IOException | java.nio.file.InvalidPathException exception) {
             throw new CodexException("Unable to verify stored Codex thread workspace", exception);
+        }
+    }
+
+    private String profileId(Path workspace) {
+        return "harness-" + java.util.UUID.nameUUIDFromBytes(
+                workspace.toAbsolutePath().normalize().toString().getBytes(StandardCharsets.UTF_8)).toString().replace("-","");
+    }
+
+    /** A concrete project path, not all Device workspaces, is allowed in this profile. */
+    private void configureProjectPermissions(ObjectNode params,Path workspace) {
+        String profile=profileId(workspace);
+        params.put("permissions",profile);
+        ObjectNode config=params.putObject("config");
+        ObjectNode policy=config.putObject("permissions").putObject(profile);
+        ObjectNode filesystem=policy.putObject("filesystem");
+        filesystem.put(":root","deny");
+        filesystem.put(":minimal","read");
+        filesystem.put(":tmpdir","deny");
+        filesystem.put(":slash_tmp","deny");
+        ObjectNode project=filesystem.putObject(workspace.toAbsolutePath().normalize().toString());
+        project.put(".","write");
+        project.put(".git","read");
+        project.put(".codex","read");
+        policy.putObject("network").put("enabled",false);
+    }
+
+    private void verifyPermissionProfile(JsonNode response,Path workspace) {
+        if(!profileId(workspace).equals(response.path("activePermissionProfile").path("id").asText())) {
+            throw new CodexException("Codex did not activate the restricted project permission profile; upgrade Codex and remove conflicting legacy sandbox settings");
         }
     }
 
@@ -137,12 +176,8 @@ public class AppServerCodexAdapter implements CodexGateway {
         params.put("threadId", threadId);
         params.put("cwd", workspace.toString());
         params.put("approvalPolicy", "never");
-        ObjectNode sandbox = params.putObject("sandboxPolicy");
-        sandbox.put("type", "workspaceWrite");
-        sandbox.put("networkAccess", false);
-        sandbox.put("excludeSlashTmp", true);
-        sandbox.put("excludeTmpdirEnvVar", true);
-        sandbox.putArray("writableRoots").add(workspace.toString());
+        // Inherit the profile already verified on thread/start or thread/resume.
+        // A turn-level profile name triggers a fresh config load without the thread's inline permissions table.
         ArrayNode inputs = params.putArray("input");
         ObjectNode text = inputs.addObject();
         text.put("type", "text");
@@ -264,7 +299,7 @@ public class AppServerCodexAdapter implements CodexGateway {
         clientInfo.put("title", "My Harness For Codex Agent");
         clientInfo.put("version", AgentMetadata.version());
         ObjectNode capabilities = params.putObject("capabilities");
-        capabilities.put("experimentalApi", false);
+        capabilities.put("experimentalApi", true);
         request("initialize", params);
 
         ObjectNode initialized = objectMapper.createObjectNode();

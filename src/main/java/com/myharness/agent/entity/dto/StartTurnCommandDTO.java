@@ -1,6 +1,9 @@
 package com.myharness.agent.entity.dto;
 
 public class StartTurnCommandDTO {
+    private boolean recreateUnstartedThread;
+    public boolean isRecreateUnstartedThread() { return recreateUnstartedThread; }
+    public void setRecreateUnstartedThread(boolean value) { recreateUnstartedThread = value; }
     private String projectId;
     private String workspaceName;
     private String codexThreadId;

@@ -154,6 +154,27 @@ class AgentSessionManagerTest {
         assertEquals(2, gateway.resumeCount);
         assertEquals(1, manager.activeTurnCount());
     }
+    @Test void recreatesOnlyExplicitlyAuthorizedUnstartedThreadAndPublishesNewBinding() {
+        gateway.missingThread=true;
+        var command=recoverableTurn("2","7");
+        command.setCodexThreadId("missing-thread");
+        assertThrows(CodexThreadNotLoadedException.class,()->manager.startTurn(command));
+        assertEquals(0,gateway.threadSequence);
+        command.setRecreateUnstartedThread(true);
+        manager.startTurn(command);
+        assertEquals(1,gateway.threadSequence);
+        assertEquals(AgentEventType.THREAD_STARTED,events.get(0).getType());
+        var replacement=(com.myharness.agent.entity.dto.ThreadStartedEventDTO)events.get(0).getPayload();
+        assertEquals("missing-thread",replacement.getPreviousCodexThreadId());
+        assertEquals("7",replacement.getTurnId());
+        assertEquals(gateway.startedTurnThreadId,replacement.getCodexThreadId());
+    }
+    @Test void recreationAuthorizationDoesNotHideOtherResumeFailures() {
+        gateway.failResume=true;
+        var command=recoverableTurn("2","7");command.setRecreateUnstartedThread(true);
+        assertThrows(CodexException.class,()->manager.startTurn(command));
+        assertEquals(0,gateway.threadSequence);assertEquals(0,events.size());
+    }
 
     @Test
     void recoveryCannotReuseAnotherProjectsWorkspaceOrChangeAnExistingConversation() {
@@ -197,11 +218,13 @@ class AgentSessionManagerTest {
         private String startedTurnThreadId;
         private int resumeCount;
         private boolean failResume;
+        private boolean missingThread;
 
         @Override
         public void resumeThread(String threadId, CodexThreadOptions options) {
             resumeCount++;
             if (failResume) throw new CodexException("Stored thread unavailable");
+            if (missingThread) throw new CodexThreadNotLoadedException(threadId,null);
             resumedThreadId = threadId;
         }
 

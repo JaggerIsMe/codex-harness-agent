@@ -22,6 +22,22 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class AppServerCodexAdapterTest {
+    @Test void classifiesOnlyExactMissingThreadReadResponse(@TempDir Path workspace) {
+        var adapter=new StoredThreadAdapter(workspace);
+        adapter.readFailure=new CodexException("read failed",new CodexException("thread not loaded: original-thread"));
+        assertThrows(CodexThreadNotLoadedException.class,()->adapter.resumeThread("original-thread",new CodexThreadOptions("project",workspace,null)));
+        adapter.readFailure=new CodexException("read failed",new CodexException("thread not loaded: another-thread"));
+        var failure=assertThrows(CodexException.class,()->adapter.resumeThread("original-thread",new CodexThreadOptions("project",workspace,null)));
+        assertFalse(failure instanceof CodexThreadNotLoadedException);
+        assertEquals(List.of("thread/read","thread/read"),adapter.methods);
+    }
+    @Test void refusesLegacyFallbackWithoutActivatingProjectProfile(@TempDir Path workspace) {
+        var adapter=new StoredThreadAdapter(workspace);adapter.ignoreProfile=true;
+        assertThrows(CodexException.class,()->adapter.resumeThread("original-thread",new CodexThreadOptions("project",workspace,null)));
+        assertThrows(CodexException.class,()->adapter.startTurn("original-thread",new CodexTurnInput("read another project",null,null),
+                org.mockito.Mockito.mock(CodexEventListener.class)));
+        assertEquals(List.of("thread/read","thread/resume"),adapter.methods);
+    }
     @Test
     void restoresStoredThreadBeforeStartingTurnWithRestrictedWorkspace(@TempDir Path workspace) {
         var adapter = new StoredThreadAdapter(workspace);
@@ -35,15 +51,20 @@ class AppServerCodexAdapterTest {
         JsonNode resume = adapter.params.get(1);
         assertEquals("original-thread", resume.path("threadId").asText());
         assertEquals("never", resume.path("approvalPolicy").asText());
-        assertEquals("workspace-write", resume.path("sandbox").asText());
+        assertFalse(resume.has("sandbox"));
+        String profile=resume.path("permissions").asText();
+        var policy=resume.path("config").path("permissions").path(profile);
+        assertEquals("deny",policy.path("filesystem").path(":root").asText());
+        assertEquals("read",policy.path("filesystem").path(":minimal").asText());
+        assertEquals("write",policy.path("filesystem").path(workspace.toString()).path(".").asText());
+        assertEquals("deny",policy.path("filesystem").path(":tmpdir").asText());
+        assertFalse(policy.path("network").path("enabled").asBoolean());
         JsonNode turn = adapter.params.get(2);
         assertEquals("original-thread", turn.path("threadId").asText());
         assertEquals(workspace.toString(), turn.path("cwd").asText());
         assertEquals("never", turn.path("approvalPolicy").asText());
-        assertEquals("workspaceWrite", turn.path("sandboxPolicy").path("type").asText());
-        assertFalse(turn.path("sandboxPolicy").path("networkAccess").asBoolean());
-        assertEquals(1, turn.path("sandboxPolicy").path("writableRoots").size());
-        assertEquals(workspace.toString(), turn.path("sandboxPolicy").path("writableRoots").get(0).asText());
+        assertFalse(turn.has("sandboxPolicy"));
+        assertFalse(turn.has("permissions"), "Turns must inherit the verified thread policy, not reload an inline-only profile by name");
     }
 
     @Test
@@ -90,6 +111,8 @@ class AppServerCodexAdapterTest {
         private final List<JsonNode> params = new ArrayList<>();
         private boolean failResume;
         private boolean active;
+        private boolean ignoreProfile;
+        private CodexException readFailure;
 
         StoredThreadAdapter(Path workspace) {
             super(new AgentProperties(), new ObjectMapper());
@@ -101,10 +124,13 @@ class AppServerCodexAdapterTest {
             params.add(input.deepCopy());
             ObjectNode result = mapper.createObjectNode();
             if ("thread/read".equals(method) || "thread/resume".equals(method)) {
+                if ("thread/read".equals(method) && readFailure!=null) throw readFailure;
                 if ("thread/resume".equals(method) && failResume) throw new CodexException("Resume failed");
+                if ("thread/resume".equals(method) && !ignoreProfile) result.putObject("activePermissionProfile").put("id",input.path("permissions").asText());
                 result.putObject("thread").put("id", "original-thread").put("cwd", workspace.toString())
                         .putObject("status").put("type", active ? "active" : "notLoaded");
             } else if ("turn/start".equals(method)) {
+                if (input.hasNonNull("permissions")) throw new CodexException("failed to load configuration: default_permissions requires a `[permissions]` table");
                 result.putObject("turn").put("id", "new-turn");
             } else {
                 throw new AssertionError("Unexpected RPC: " + method);

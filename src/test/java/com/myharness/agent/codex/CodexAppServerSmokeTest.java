@@ -3,6 +3,7 @@ package com.myharness.agent.codex;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.myharness.agent.config.AgentProperties;
+import com.myharness.agent.entity.enums.TurnEventType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
@@ -26,6 +27,80 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @EnabledIfSystemProperty(named = "codex.smoke", matches = "true")
 class CodexAppServerSmokeTest {
     @Test
+    @EnabledIfSystemProperty(named = "codex.turn.smoke", matches = "true")
+    void resumesThreadCreatedBeforeAnySuccessfulTurn(@TempDir Path workspace, @TempDir Path agentData) throws Exception {
+        var properties = new AgentProperties();
+        properties.setCodexRequestTimeoutSeconds(45);
+        String threadId;
+        try (var adapter = new AppServerCodexAdapter(properties, new ObjectMapper())) {
+            threadId = adapter.startThread(new CodexThreadOptions("empty-thread-smoke", workspace, null));
+        }
+        try (var adapter = new AppServerCodexAdapter(properties, new ObjectMapper())) {
+            var allowed = new com.myharness.agent.config.WorkspaceProperties();
+            allowed.setName("empty");allowed.setPath(workspace);
+            properties.setWorkspaces(List.of(allowed));properties.setDataDir(agentData);
+            var registry = new com.myharness.agent.workspace.WorkspaceRegistry(properties,new ObjectMapper());
+            var bus = new com.myharness.agent.connection.AgentEventBus();
+            var events = new java.util.concurrent.CopyOnWriteArrayList<com.myharness.agent.connection.AgentEvent>();
+            bus.subscribe(events::add);
+            var manager = new AgentSessionManager(adapter,registry,bus,properties);
+            var turn = new com.myharness.agent.entity.dto.StartTurnCommandDTO();
+            turn.setProjectId("empty-thread-smoke");turn.setWorkspaceName("empty");turn.setConversationId("1");
+            turn.setTurnId("1");turn.setCodexThreadId(threadId);turn.setMessage("Reply exactly HARNESS_OK without using tools.");
+            org.junit.jupiter.api.Assertions.assertThrows(CodexThreadNotLoadedException.class,()->manager.startTurn(turn));
+            turn.setRecreateUnstartedThread(true);
+            var finished=new CompletableFuture<String>();var answer=new StringBuffer();
+            bus.subscribe(event->{
+                if(event.getType()==com.myharness.agent.entity.enums.AgentEventType.TURN_EVENT) {
+                    var value=(com.myharness.agent.entity.dto.TurnEventDTO)event.getPayload();
+                    if(value.getEventType()==TurnEventType.AGENT_MESSAGE_DELTA) answer.append(value.getContent());
+                }
+                if(event.getType()==com.myharness.agent.entity.enums.AgentEventType.TURN_COMPLETED) finished.complete(answer.toString());
+                if(event.getType()==com.myharness.agent.entity.enums.AgentEventType.TURN_FAILED) finished.completeExceptionally(new AssertionError("Recreated thread failed"));
+            });
+            manager.startTurn(turn);
+            var rebound=(com.myharness.agent.entity.dto.ThreadStartedEventDTO)events.get(0).getPayload();
+            org.junit.jupiter.api.Assertions.assertNotEquals(threadId,rebound.getCodexThreadId());
+            assertTrue(finished.get(90,TimeUnit.SECONDS).contains("HARNESS_OK"));
+        }
+    }
+    @Test
+    @EnabledIfSystemProperty(named = "codex.turn.smoke", matches = "true")
+    void repliesToUserAfterStartingAndResumingRestrictedThread(@TempDir Path workspace) throws Exception {
+        AgentProperties properties = new AgentProperties();
+        properties.setCodexRequestTimeoutSeconds(45);
+        String threadId;
+        try (var adapter = new AppServerCodexAdapter(properties, new ObjectMapper())) {
+            threadId = adapter.startThread(new CodexThreadOptions("turn-smoke", workspace, null));
+            assertReply(adapter, threadId);
+        }
+        try (var adapter = new AppServerCodexAdapter(properties, new ObjectMapper())) {
+            adapter.resumeThread(threadId, new CodexThreadOptions("turn-smoke", workspace, null));
+            assertReply(adapter, threadId);
+        }
+    }
+
+    private void assertReply(AppServerCodexAdapter adapter, String threadId) throws Exception {
+        var completed = new CompletableFuture<String>();
+        var text = new StringBuffer();
+        String turnId = adapter.startTurn(threadId,
+                new CodexTurnInput("Reply with exactly HARNESS_OK. Do not use tools or inspect files.", null, null),
+                new CodexEventListener() {
+                    public void onEvent(CodexEvent event) {
+                        if (event.getType() == TurnEventType.AGENT_MESSAGE_DELTA) text.append(event.getContent());
+                    }
+                    public void onApproval(CodexApproval approval) { completed.completeExceptionally(new AssertionError("Unexpected approval")); }
+                    public void onCompleted(String id, String status, String reason) {
+                        if (!"completed".equalsIgnoreCase(status)) completed.completeExceptionally(new AssertionError(CodexDiagnostics.redact(reason)));
+                        else completed.complete(text.toString());
+                    }
+                });
+        assertNotNull(turnId);
+        try { assertTrue(completed.get(90, TimeUnit.SECONDS).contains("HARNESS_OK"), "No assistant reply received"); }
+        finally { if (!completed.isDone()) adapter.interruptTurn(threadId, turnId); }
+    }
+
+    @Test
     @EnabledIfSystemProperty(named = "codex.resume.thread", matches = ".+")
     void resumesExistingStoredThreadWithoutSendingModelRequest() {
         AgentProperties properties = new AgentProperties();
@@ -40,7 +115,7 @@ class CodexAppServerSmokeTest {
     @Test
     void createsThreadThroughAgentAdapter(@TempDir Path workspace) {
         AgentProperties properties = new AgentProperties();
-        properties.setCodexRequestTimeoutSeconds(15);
+        properties.setCodexRequestTimeoutSeconds(45);
         AppServerCodexAdapter adapter = new AppServerCodexAdapter(properties, new ObjectMapper());
         List<ProcessHandle> ownedProcesses = new ArrayList<>();
         try {
@@ -55,6 +130,11 @@ class CodexAppServerSmokeTest {
             List<Long> alive = ownedProcesses.stream().filter(ProcessHandle::isAlive).map(ProcessHandle::pid).toList();
             assertTrue(alive.isEmpty(), "Adapter close left its own processes running: " + alive);
         } finally {
+            Process started = (Process) ReflectionTestUtils.getField(adapter, "process");
+            if (started != null && started.isAlive()) {
+                ownedProcesses.addAll(started.descendants().toList());
+                ownedProcesses.add(started.toHandle());
+            }
             adapter.close();
             // Cleanup is limited to handles captured from this test's own process tree, even when the assertion fails.
             for (ProcessHandle handle : ownedProcesses) {

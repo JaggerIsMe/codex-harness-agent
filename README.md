@@ -2,6 +2,8 @@
 
 Harness Agent 运行在目标电脑上，通过主动 WSS 连接接受 Harness Server 指令，并在受控工作区内驱动本机 `codex app-server`。
 
+用户与机器授权模块要求升级到本版 Agent：上报 `WINDOWS_PROJECT_PROFILE`，创建/恢复线程时启用并核验每项目独立权限配置；旧写入隔离模式不能执行多用户项目。详见 [隔离边界、升级与验收](../../docs/user-device-rbac.md)。
+
 已实现的 V1 功能：
 
 - 一次性注册码注册设备，或直接使用已签发的设备编码和设备令牌。
@@ -117,6 +119,10 @@ mvn '-Dcodex.smoke=true' '-Dtest=CodexAppServerSmokeTest' test
 该验证通过实际启动命令完成初始化，并通过 Agent 适配器创建一个测试会话，不发送模型请求。测试会话会由本机 Codex 保存。
 
 ## Agent 重启后已有会话无法续聊
+
+2026-09-05：若首条消息从未成功执行，重启后报 `thread not loaded`，需同步更新 Server 与 Agent，支持后端授权的空线程重新初始化。原会话可重发消息，不用删历史或修改数据库；已有模型历史不会自动重建。详见 [空线程恢复说明](../../docs/agent-empty-thread-recovery.md)。
+
+若发送消息立即失败并出现 `default_permissions requires a [permissions] table`，更新到当前 Agent 后重启即可。已修复轮次级权限名称覆盖导致 Codex 丢失线程内联权限表的问题；每轮继承启动/恢复线程时已验证的权限，继续维持项目隔离。无需改数据库或手工修复 Redis，失败消息可在原会话重发。完整复现与验证见 [验收记录](../../docs/user-device-rbac-verification.md)。
 
 旧实现仅在内存中保存 Conversation 与 Codex Thread 的映射，重启后已有会话会报 `CONVERSATION_NOT_STARTED`，即使 Server 返回的 Conversation 仍为 `ACTIVE`。当前实现要求 Server 的 `START_TURN` 同时携带数据库中的项目 ID、工作区名称和 Codex Thread ID；Agent 会在缺失映射时核验原 Thread 的真实目录并恢复它，再发送新 Turn。
 

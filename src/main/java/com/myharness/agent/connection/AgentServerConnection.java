@@ -162,7 +162,8 @@ public class AgentServerConnection extends AbstractWebSocketHandler implements S
     private AgentEvent registerEvent() {
         String osName=System.getProperty("os.name");
         String isolationMode=osName!=null && osName.toLowerCase(java.util.Locale.ROOT).contains("win")
-                ? "WINDOWS_ELEVATED" : "UNSUPPORTED";
+                && properties.isStrictProjectIsolation() && "elevated".equalsIgnoreCase(properties.getWindowsSandbox())
+                ? "WINDOWS_PROJECT_PROFILE" : "UNSUPPORTED";
         RegisterEventDTO payload = new RegisterEventDTO(properties.getDeviceName(), AgentMetadata.version(),
                 osName,System.getProperty("os.version"),isolationMode,workspaceRegistry.list(),
                 workspaceRegistry.roots());
