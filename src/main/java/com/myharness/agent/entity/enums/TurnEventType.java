@@ -1,0 +1,16 @@
+package com.myharness.agent.entity.enums;
+
+public enum TurnEventType {
+    AGENT_MESSAGE_DELTA,
+    PLAN_DELTA,
+    COMMAND_STARTED,
+    COMMAND_OUTPUT_DELTA,
+    COMMAND_COMPLETED,
+    FILE_CHANGE_STARTED,
+    FILE_CHANGE_DELTA,
+    FILE_CHANGE_COMPLETED,
+    TURN_DIFF_UPDATED,
+    ITEM_STARTED,
+    ITEM_COMPLETED,
+    WARNING
+}

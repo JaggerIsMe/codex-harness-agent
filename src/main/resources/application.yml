@@ -1,0 +1,32 @@
+spring:
+  application:
+    name: harness-agent
+  main:
+    web-application-type: none
+
+harness:
+  agent:
+    server-url: ws://localhost:9010/ws/agent
+    enrollment-url: http://localhost:9010/api/v1/agent/enroll
+    device-code:
+    device-token:
+    enrollment-code: ENR-G8M3-2HNZ
+    device-name: local-device-1
+    data-dir: D:/a_Coder/WorkSpace/webSer/myApps/agent-harness/.my-harness-agent
+    skill-install-dir: D:/a_Coder/WorkSpace/webSer/myApps/agent-harness/.agents/skills
+    max-concurrent-turns: 1
+    heartbeat-interval-seconds: 15
+    reconnect-max-delay-seconds: 30
+    command-deduplication-size: 1000
+    codex-command: codex
+    strict-project-isolation: true
+    windows-sandbox: elevated
+    codex-request-timeout-seconds: 30
+    skill-max-download-size-mb: 20
+    skill-max-file-count: 500
+    skill-max-single-file-size-mb: 20
+    skill-max-expanded-size-mb: 100
+    workspace-roots:
+      - name: workspace-root
+        path: D:/a_Coder/WorkSpace/webSer/myApps/agent-harness/workspaces
+    workspaces: []

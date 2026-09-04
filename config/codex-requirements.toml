@@ -1,0 +1,2 @@
+[windows]
+allowed_sandbox_implementations = ["elevated"]

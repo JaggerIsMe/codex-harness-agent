@@ -1,0 +1,20 @@
+package com.myharness.agent.entity.enums;
+
+public enum AgentEventType {
+    REGISTER,
+    HEARTBEAT,
+    WORKSPACES_CHANGED,
+    THREAD_STARTED,
+    TURN_STARTED,
+    TURN_EVENT,
+    APPROVAL_REQUIRED,
+    APPROVAL_RESOLVED,
+    TURN_COMPLETED,
+    TURN_FAILED,
+    TURN_INTERRUPTED,
+    SKILL_INSTALL_RESULT,
+    SKILL_REMOVE_RESULT,
+    WORKSPACE_CREATE_RESULT,
+    ERROR,
+    PONG
+}
