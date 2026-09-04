@@ -33,22 +33,26 @@ class AgentSessionManagerTest {
     private FakeCodexGateway gateway;
     private AgentSessionManager manager;
     private List<AgentEvent> events;
+    private AgentProperties properties;
+    private WorkspaceRegistry registry;
+    private AgentEventBus eventBus;
 
     @BeforeEach
     void setUp() throws Exception {
         Path workspaceRoot = Files.createDirectory(temporaryDirectory.resolve("workspace"));
-        AgentProperties properties = new AgentProperties();
+        properties = new AgentProperties();
         properties.setDataDir(temporaryDirectory.resolve("agent-data"));
         properties.setMaxConcurrentTurns(1);
         WorkspaceProperties workspace = new WorkspaceProperties();
         workspace.setName("demo");
         workspace.setPath(workspaceRoot);
         properties.setWorkspaces(Collections.singletonList(workspace));
-        AgentEventBus eventBus = new AgentEventBus();
+        eventBus = new AgentEventBus();
         events = new ArrayList<>();
         eventBus.subscribe(events::add);
         gateway = new FakeCodexGateway();
-        manager = new AgentSessionManager(gateway, new WorkspaceRegistry(properties, new ObjectMapper()), eventBus, properties);
+        registry = new WorkspaceRegistry(properties, new ObjectMapper());
+        manager = new AgentSessionManager(gateway, registry, eventBus, properties);
     }
 
     @Test
@@ -113,6 +117,69 @@ class AgentSessionManagerTest {
         return command;
     }
 
+    @Test
+    void resumesOriginalConversationAfterAgentRestartAndContinuesStreaming() {
+        manager.startThread(thread("2"));
+        manager.startTurn(turn("2", "2"));
+        gateway.listener.onCompleted("codex-turn-1", "completed", null);
+        manager = new AgentSessionManager(gateway, registry, eventBus, properties);
+        events.clear();
+
+        StartTurnCommandDTO followUp = recoverableTurn("2", "7");
+        AgentEvent started = manager.startTurn(followUp);
+
+        assertEquals(AgentEventType.TURN_STARTED, started.getType());
+        assertEquals("codex-thread-1", gateway.resumedThreadId);
+        assertEquals("codex-thread-1", gateway.startedTurnThreadId);
+        assertEquals(1, gateway.threadSequence, "Recovery must not create a replacement thread");
+        gateway.listener.onEvent(new CodexEvent(com.myharness.agent.entity.enums.TurnEventType.AGENT_MESSAGE_DELTA,
+                "answer", "hello again", null));
+        gateway.listener.onCompleted("codex-turn-1", "completed", null);
+        assertEquals(AgentEventType.TURN_EVENT, events.get(0).getType());
+        assertEquals(AgentEventType.TURN_COMPLETED, events.get(1).getType());
+        assertEquals(0, manager.activeTurnCount());
+        manager.startTurn(recoverableTurn("2", "8"));
+        assertEquals(1, gateway.resumeCount, "Warm conversations must reuse the restored mapping");
+    }
+
+    @Test
+    void failedRecoveryReleasesCapacityAndDoesNotCacheSessionOrProjectBinding() {
+        gateway.failResume = true;
+        assertThrows(CodexException.class, () -> manager.startTurn(recoverableTurn("2", "7")));
+        assertEquals(0, manager.activeTurnCount());
+        gateway.failResume = false;
+        StartTurnCommandDTO retry = recoverableTurn("2", "8");
+        retry.setProjectId("another-project");
+        manager.startTurn(retry);
+        assertEquals(2, gateway.resumeCount);
+        assertEquals(1, manager.activeTurnCount());
+    }
+
+    @Test
+    void recoveryCannotReuseAnotherProjectsWorkspaceOrChangeAnExistingConversation() {
+        manager.startThread(thread("existing"));
+        StartTurnCommandDTO otherProject = recoverableTurn("2", "7");
+        otherProject.setProjectId("another-project");
+        otherProject.setCodexThreadId("another-thread");
+        assertEquals("WORKSPACE_ALREADY_BOUND", assertThrows(AgentOperationException.class,
+                () -> manager.startTurn(otherProject)).getErrorCode());
+        StartTurnCommandDTO changedThread = recoverableTurn("existing", "8");
+        changedThread.setCodexThreadId("different-thread");
+        assertEquals("CONVERSATION_BINDING_MISMATCH", assertThrows(AgentOperationException.class,
+                () -> manager.startTurn(changedThread)).getErrorCode());
+        assertEquals("CONVERSATION_BINDING_MISMATCH", assertThrows(AgentOperationException.class,
+                () -> manager.startTurn(recoverableTurn("duplicate-conversation", "9"))).getErrorCode());
+        assertEquals(0, gateway.resumeCount);
+    }
+
+    private StartTurnCommandDTO recoverableTurn(String conversationId, String turnId) {
+        StartTurnCommandDTO command = turn(conversationId, turnId);
+        command.setProjectId("project-demo");
+        command.setWorkspaceName("demo");
+        command.setCodexThreadId("codex-thread-1");
+        return command;
+    }
+
     private StartTurnCommandDTO turn(String conversationId, String turnId) {
         StartTurnCommandDTO command = new StartTurnCommandDTO();
         command.setConversationId(conversationId);
@@ -126,6 +193,17 @@ class AgentSessionManagerTest {
         private CodexEventListener listener;
         private String interruptedThreadId;
         private String interruptedTurnId;
+        private String resumedThreadId;
+        private String startedTurnThreadId;
+        private int resumeCount;
+        private boolean failResume;
+
+        @Override
+        public void resumeThread(String threadId, CodexThreadOptions options) {
+            resumeCount++;
+            if (failResume) throw new CodexException("Stored thread unavailable");
+            resumedThreadId = threadId;
+        }
 
         @Override
         public String startThread(CodexThreadOptions options) {
@@ -135,6 +213,7 @@ class AgentSessionManagerTest {
 
         @Override
         public String startTurn(String threadId, CodexTurnInput input, CodexEventListener listener) {
+            startedTurnThreadId = threadId;
             this.listener = listener;
             return "codex-turn-1";
         }

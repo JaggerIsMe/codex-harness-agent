@@ -79,6 +79,47 @@ public class AppServerCodexAdapter implements CodexGateway {
     }
 
     @Override
+    public void resumeThread(String threadId, CodexThreadOptions options) {
+        requireText(threadId, "Codex thread ID");
+        if (options == null || options.getWorkspace() == null) {
+            throw new CodexException("Workspace is required to resume a Codex thread");
+        }
+        if (properties.isStrictProjectIsolation() && !hasText(options.getProjectId())) {
+            throw new CodexException("Project ID is required in strict project isolation mode");
+        }
+        // Verify the persisted root before applying overrides: resume must not move another project's history.
+        ObjectNode read = objectMapper.createObjectNode().put("threadId", threadId).put("includeTurns", false);
+        JsonNode stored = request("thread/read", read).path("thread");
+        verifyThreadBinding(stored, threadId, options.getWorkspace());
+        if ("active".equals(stored.path("status").path("type").asText())) {
+            throw new CodexException("Cannot resume a Codex thread with an active Turn");
+        }
+        ObjectNode params = objectMapper.createObjectNode();
+        params.put("threadId", threadId);
+        params.put("cwd", options.getWorkspace().toString());
+        params.put("approvalPolicy", "never");
+        params.put("sandbox", "workspace-write");
+        if (hasText(options.getModel())) params.put("model", options.getModel().trim());
+        JsonNode resumed = request("thread/resume", params).path("thread");
+        verifyThreadBinding(resumed, threadId, options.getWorkspace());
+        threadWorkspaces.put(threadId, options.getWorkspace());
+    }
+
+    private void verifyThreadBinding(JsonNode thread, String threadId, Path workspace) {
+        if (!threadId.equals(requiredText(thread, "id", "Codex thread response"))) {
+            throw new CodexException("Resumed Codex thread ID does not match the Conversation");
+        }
+        String cwd = requiredText(thread, "cwd", "Codex thread response");
+        try {
+            if (!Path.of(cwd).toRealPath().equals(workspace.toRealPath())) {
+                throw new CodexException("Stored Codex thread workspace does not match the allowed project workspace");
+            }
+        } catch (IOException | java.nio.file.InvalidPathException exception) {
+            throw new CodexException("Unable to verify stored Codex thread workspace", exception);
+        }
+    }
+
+    @Override
     public String startTurn(String threadId, CodexTurnInput input, CodexEventListener listener) {
         requireText(threadId, "Codex thread ID");
         if (input == null || !hasText(input.getMessage())) {
@@ -153,7 +194,7 @@ public class AppServerCodexAdapter implements CodexGateway {
         write(response);
     }
 
-    private JsonNode request(String method, JsonNode params) {
+    JsonNode request(String method, JsonNode params) {
         ensureStarted();
         long id = requestSequence.incrementAndGet();
         CompletableFuture<JsonNode> future = new CompletableFuture<>();

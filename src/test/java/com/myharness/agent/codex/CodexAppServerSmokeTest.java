@@ -26,6 +26,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @EnabledIfSystemProperty(named = "codex.smoke", matches = "true")
 class CodexAppServerSmokeTest {
     @Test
+    @EnabledIfSystemProperty(named = "codex.resume.thread", matches = ".+")
+    void resumesExistingStoredThreadWithoutSendingModelRequest() {
+        AgentProperties properties = new AgentProperties();
+        properties.setCodexRequestTimeoutSeconds(20);
+        try (AppServerCodexAdapter adapter = new AppServerCodexAdapter(properties, new ObjectMapper())) {
+            adapter.resumeThread(System.getProperty("codex.resume.thread"),
+                    new CodexThreadOptions("resume-smoke-project",
+                            Path.of(System.getProperty("codex.resume.workspace")), null));
+        }
+    }
+
+    @Test
     void createsThreadThroughAgentAdapter(@TempDir Path workspace) {
         AgentProperties properties = new AgentProperties();
         properties.setCodexRequestTimeoutSeconds(15);

@@ -4,6 +4,13 @@ spring:
   main:
     web-application-type: none
 
+project:
+  folder: D:/a_Coder/WorkSpace/webSer/myApps/agent-harness
+
+log:
+  root:
+    level: debug
+
 harness:
   agent:
     server-url: ws://localhost:9010/ws/agent

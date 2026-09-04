@@ -1,11 +1,21 @@
 package com.myharness.agent.entity.dto;
 
 public class StartTurnCommandDTO {
+    private String projectId;
+    private String workspaceName;
+    private String codexThreadId;
     private String conversationId;
     private String turnId;
     private String message;
     private String model;
     private String reasoningEffort;
+
+    public String getProjectId() { return projectId; }
+    public void setProjectId(String projectId) { this.projectId = projectId; }
+    public String getWorkspaceName() { return workspaceName; }
+    public void setWorkspaceName(String workspaceName) { this.workspaceName = workspaceName; }
+    public String getCodexThreadId() { return codexThreadId; }
+    public void setCodexThreadId(String codexThreadId) { this.codexThreadId = codexThreadId; }
 
     public String getConversationId() { return conversationId; }
     public void setConversationId(String conversationId) { this.conversationId = conversationId; }

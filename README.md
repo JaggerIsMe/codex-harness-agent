@@ -10,6 +10,7 @@ Harness Agent 运行在目标电脑上，通过主动 WSS 连接接受 Harness S
 - 固定协议版本、消息类型白名单、有界命令去重和重复结果重放。
 - `START_THREAD`、`START_TURN`、`INTERRUPT_TURN`、`INSTALL_SKILL`、`REMOVE_SKILL`、`CREATE_WORKSPACE`、`REFRESH_WORKSPACES`、`PING` 命令。
 - 单 Codex App Server 进程、JSON-RPC 初始化、项目/Thread/Turn 映射和流式事件。
+- Agent 重启后按 Server 保存的 Codex Thread ID 恢复已有 Conversation，核验工作区后续聊原历史。
 - 严格项目模式下强制 Codex 原生 Windows `elevated` 沙箱，不允许降级到 `unelevated`，也不允许通过审批扩大项目权限。
 - 每个 Turn 使用唯一项目目录作为 `writableRoots`，关闭网络访问，并拒绝不同项目复用或重叠执行目录。
 - 全局 Turn 并发限制与同一 Conversation 单活动 Turn 限制。
@@ -114,3 +115,19 @@ mvn '-Dcodex.smoke=true' '-Dtest=CodexAppServerSmokeTest' test
 ```
 
 该验证通过实际启动命令完成初始化，并通过 Agent 适配器创建一个测试会话，不发送模型请求。测试会话会由本机 Codex 保存。
+
+## Agent 重启后已有会话无法续聊
+
+旧实现仅在内存中保存 Conversation 与 Codex Thread 的映射，重启后已有会话会报 `CONVERSATION_NOT_STARTED`，即使 Server 返回的 Conversation 仍为 `ACTIVE`。当前实现要求 Server 的 `START_TURN` 同时携带数据库中的项目 ID、工作区名称和 Codex Thread ID；Agent 会在缺失映射时核验原 Thread 的真实目录并恢复它，再发送新 Turn。
+
+更新并重启 Server 与 Agent 后，在原 Conversation 重试即可，不需要新建会话或修改数据库。之前失败的 Turn 保留为失败，不会自动重发。原 Thread 文件丢失、工作区变化或已有活动 Turn 时恢复会明确失败，不会静默创建新 Thread。
+
+如果恢复返回 `already has an active writer`，说明同一 Codex Thread 已被另一个 App Server（例如使用相同 Codex 用户目录的桌面应用）占用。先在占用方释放该 Thread，再重试；不要删除写锁文件或并发写入同一 Thread。真实恢复验证须使用实际 Agent 的 Windows 用户及 Codex 用户目录，隔离测试账户的空历史不能用于验证其他用户的会话。
+
+可显式选择一个已有且空闲的本机 Thread，验证真实 App Server 的读取与恢复协议（不发送模型请求）：
+
+```powershell
+mvn '-Dcodex.smoke=true' '-Dtest=CodexAppServerSmokeTest#resumesExistingStoredThreadWithoutSendingModelRequest' '-Dcodex.resume.thread=<已有Thread ID>' '-Dcodex.resume.workspace=<原工作区绝对路径>' test
+```
+
+恢复使用官方 [Codex App Server 的 thread/read 与 thread/resume 协议](https://learn.chatgpt.com/docs/app-server)。恢复前后都会校验 Thread ID 和目录；执行 Turn 时继续强制单工作区、禁网与 `approvalPolicy=never`。

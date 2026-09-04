@@ -45,6 +45,12 @@ public class AgentSessionManager {
     }
 
     public AgentEvent startThread(StartThreadCommandDTO command) {
+        synchronized (isolationLock) {
+            return createThread(command);
+        }
+    }
+
+    private AgentEvent createThread(StartThreadCommandDTO command) {
         require(command == null ? null : command.getProjectId(), "projectId");
         require(command == null ? null : command.getConversationId(), "conversationId");
         require(command.getWorkspaceName(), "workspaceName");
@@ -66,7 +72,7 @@ public class AgentSessionManager {
             releaseUnusedProjectRoot(command.getProjectId(),workspace);
             throw exception;
         }
-        SessionContext context = new SessionContext(command.getProjectId(),command.getConversationId(), codexThreadId);
+        SessionContext context = new SessionContext(command.getProjectId(),command.getConversationId(), codexThreadId, workspace);
         SessionContext existing = sessions.putIfAbsent(command.getConversationId(), context);
         if (existing != null) {
             throw new AgentOperationException("CONVERSATION_ALREADY_STARTED",
@@ -80,9 +86,15 @@ public class AgentSessionManager {
         require(command == null ? null : command.getConversationId(), "conversationId");
         require(command.getTurnId(), "turnId");
         require(command.getMessage(), "message");
-        SessionContext session = session(command.getConversationId());
         if (!turnPermits.tryAcquire()) {
             throw new AgentOperationException("AGENT_BUSY", "Agent has reached its concurrent Turn limit");
+        }
+        final SessionContext session;
+        try {
+            session = sessionForTurn(command);
+        } catch (RuntimeException exception) {
+            turnPermits.release();
+            throw exception;
         }
 
         ActiveTurn active = new ActiveTurn(command.getTurnId());
@@ -229,6 +241,50 @@ public class AgentSessionManager {
         return session;
     }
 
+    private SessionContext sessionForTurn(StartTurnCommandDTO command) {
+        // Serialize creation and recovery so concurrent commands cannot rebind a project or thread.
+        synchronized (isolationLock) {
+            SessionContext existing = sessions.get(command.getConversationId());
+            // Older Servers can continue an already loaded conversation, but cannot recover one.
+            if (existing != null && command.getProjectId() == null && command.getWorkspaceName() == null
+                    && command.getCodexThreadId() == null) return existing;
+            require(command.getProjectId(), "projectId");
+            require(command.getWorkspaceName(), "workspaceName");
+            require(command.getCodexThreadId(), "codexThreadId");
+            final Path workspace;
+            try {
+                workspace = workspaceRegistry.resolve(command.getWorkspaceName(), "").toAbsolutePath().normalize();
+            } catch (WorkspaceAccessException exception) {
+                throw new AgentOperationException("WORKSPACE_NOT_ALLOWED", exception.getMessage(), exception);
+            }
+            if (existing != null) {
+                if (!existing.projectId.equals(command.getProjectId())
+                        || !existing.codexThreadId.equals(command.getCodexThreadId())
+                        || !existing.workspace.equals(workspace)) {
+                    throw new AgentOperationException("CONVERSATION_BINDING_MISMATCH",
+                            "Conversation project, workspace or Codex thread does not match its existing binding");
+                }
+                return existing;
+            }
+            if (sessions.values().stream().anyMatch(value -> value.codexThreadId.equals(command.getCodexThreadId()))) {
+                throw new AgentOperationException("CONVERSATION_BINDING_MISMATCH",
+                        "Codex thread is already bound to another Conversation");
+            }
+            reserveProjectRoot(command.getProjectId(), workspace);
+            try {
+                codexGateway.resumeThread(command.getCodexThreadId(),
+                        new CodexThreadOptions(command.getProjectId(), workspace, command.getModel()));
+                SessionContext restored = new SessionContext(command.getProjectId(), command.getConversationId(),
+                        command.getCodexThreadId(), workspace);
+                sessions.put(command.getConversationId(), restored);
+                return restored;
+            } catch (RuntimeException exception) {
+                releaseUnusedProjectRoot(command.getProjectId(), workspace);
+                throw exception;
+            }
+        }
+    }
+
     private void require(String value, String field) {
         if (value == null || value.trim().isEmpty()) {
             throw new AgentOperationException("INVALID_COMMAND", field + " must not be blank");
@@ -262,12 +318,14 @@ public class AgentSessionManager {
         private final String projectId;
         private final String conversationId;
         private final String codexThreadId;
+        private final Path workspace;
         private volatile ActiveTurn activeTurn;
 
-        private SessionContext(String projectId,String conversationId, String codexThreadId) {
+        private SessionContext(String projectId,String conversationId, String codexThreadId, Path workspace) {
             this.projectId = projectId;
             this.conversationId = conversationId;
             this.codexThreadId = codexThreadId;
+            this.workspace = workspace;
         }
     }
 
