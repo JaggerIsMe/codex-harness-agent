@@ -13,14 +13,20 @@ log:
 
 harness:
   agent:
+    artifacts:
+      max-file-bytes: 20971520
+      max-files: 5
+      max-total-bytes: 52428800
+      max-spool-bytes: 524288000
+      max-spool-files: 1000
     server-url: ws://localhost:9010/ws/agent
     enrollment-url: http://localhost:9010/api/v1/agent/enroll
     device-code:
     device-token:
     enrollment-code: ENR-G8M3-2HNZ
     device-name: local-device-1
-    data-dir: D:/a_Coder/WorkSpace/webSer/myApps/agent-harness/.my-harness-agent
-    skill-install-dir: D:/a_Coder/WorkSpace/webSer/myApps/agent-harness/.agents/skills
+    data-dir: ${project.folder}/.my-harness-agent
+    skill-install-dir: ${project.folder}/.agents/skills
     max-concurrent-turns: 1
     heartbeat-interval-seconds: 15
     reconnect-max-delay-seconds: 30
@@ -35,5 +41,5 @@ harness:
     skill-max-expanded-size-mb: 100
     workspace-roots:
       - name: workspace-root
-        path: D:/a_Coder/WorkSpace/webSer/myApps/agent-harness/workspaces
+        path: ${project.folder}/workspaces
     workspaces: []

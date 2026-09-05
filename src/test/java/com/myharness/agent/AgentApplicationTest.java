@@ -69,6 +69,8 @@ class AgentApplicationTest {
         command.add("--harness.agent.device-code=test-device");
         command.add("--harness.agent.device-token=test-token");
         command.add("--harness.agent.data-dir=" + dataDirectory.toAbsolutePath());
+        command.add("--harness.agent.workspace-roots[0].name=test-root");
+        command.add("--harness.agent.workspace-roots[0].path=" + workspace.toAbsolutePath());
         command.add("--harness.agent.workspaces[0].name=test-workspace");
         command.add("--harness.agent.workspaces[0].path=" + workspace.toAbsolutePath());
         return command;

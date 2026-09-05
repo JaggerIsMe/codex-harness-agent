@@ -29,6 +29,10 @@ import java.util.List;
 @Component
 public class AgentCommandDispatcher {
     private final ProtocolCodec codec;
+    private final java.util.concurrent.ExecutorService turnExecutor=new java.util.concurrent.ThreadPoolExecutor(
+            0,32,60,java.util.concurrent.TimeUnit.SECONDS,new java.util.concurrent.SynchronousQueue<>(),
+            Thread.ofPlatform().daemon().name("harness-turn-",0).factory());
+    @jakarta.annotation.PreDestroy public void close(){turnExecutor.shutdownNow();}
     private final CommandDeduplicator deduplicator;
     private final AgentSessionManager sessionManager;
     private final SkillInstallationService skillService;
@@ -47,6 +51,15 @@ public class AgentCommandDispatcher {
     }
 
     public void handle(ProtocolEnvelope envelope) {
+        if("START_TURN".equals(envelope.getType())) {
+            try {turnExecutor.execute(() -> handleNow(envelope));}
+            catch(java.util.concurrent.RejectedExecutionException e) {
+                for(AgentEvent result:error(envelope,"AGENT_BUSY","Agent Turn executor is busy")) eventBus.publish(result);
+            }
+        } else handleNow(envelope);
+    }
+
+    private void handleNow(ProtocolEnvelope envelope) {
         List<AgentEvent> results = deduplicator.execute(envelope.getMessageId(), () -> execute(envelope));
         for (AgentEvent result : results) {
             eventBus.publish(result);

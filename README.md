@@ -87,6 +87,10 @@ harness:
 
 注意：`windows.allowed_sandbox_implementations` 是 `requirements.toml` 的策略字段，不能复制到 `%USERPROFILE%\.codex\config.toml`。否则 `--strict-config` 会报 `unknown configuration field windows.allowed_sandbox_implementations` 并终止启动。用户配置中的 `[windows]` 使用 `sandbox = "elevated"` 选择沙箱；系统策略使用单独的 `requirements.toml` 限定允许的实现。
 
+## Conversation Artifact 文件交付
+
+Agent 为 Turn 注入输出清单约定，完成时创建快照，并通过持久化上传队列交付给 Harness。失败重试和 Agent 重启均使用原快照，不重复执行 Codex。升级需同时部署后端的产物表迁移；保持 Agent data-dir 持久化。输出格式、配额、恢复行为和下载验收见 [Conversation Artifact 方案](../../docs/conversation-artifacts.md)。
+
 ## 验证与启动
 
 ```powershell

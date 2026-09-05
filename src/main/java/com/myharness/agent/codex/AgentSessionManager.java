@@ -28,6 +28,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @Component
 public class AgentSessionManager {
     private final CodexGateway codexGateway;
+    private final com.myharness.agent.attachment.ConversationAttachmentService attachments;
+    private final com.myharness.agent.artifact.ConversationArtifactService artifacts;
+    private volatile boolean acceptingTurns=true;
+    private final java.util.concurrent.atomic.AtomicLong connectionEpoch=new java.util.concurrent.atomic.AtomicLong();
+    public void connected(){acceptingTurns=true;}
+    private final java.util.Set<String> canceledTurns=java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final java.util.Set<String> attemptedAttachmentTurns=java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final WorkspaceRegistry workspaceRegistry;
     private final AgentEventBus eventBus;
     private final Semaphore turnPermits;
@@ -37,8 +44,9 @@ public class AgentSessionManager {
     private final Object isolationLock = new Object();
 
     public AgentSessionManager(CodexGateway codexGateway, WorkspaceRegistry workspaceRegistry,
-                               AgentEventBus eventBus, AgentProperties properties) {
-        this.codexGateway = codexGateway;
+                               AgentEventBus eventBus, AgentProperties properties, com.myharness.agent.attachment.ConversationAttachmentService attachments,
+                               com.myharness.agent.artifact.ConversationArtifactService artifacts) {
+        this.codexGateway = codexGateway; this.attachments=attachments; this.artifacts=artifacts;
         this.workspaceRegistry = workspaceRegistry;
         this.eventBus = eventBus;
         this.turnPermits = new Semaphore(properties.getMaxConcurrentTurns());
@@ -83,9 +91,13 @@ public class AgentSessionManager {
     }
 
     public AgentEvent startTurn(StartTurnCommandDTO command) {
+        long epoch=connectionEpoch.get();
+        if(!acceptingTurns) throw new AgentOperationException("AGENT_DISCONNECTED","Agent 已断开连接");
         require(command == null ? null : command.getConversationId(), "conversationId");
         require(command.getTurnId(), "turnId");
-        require(command.getMessage(), "message");
+        if(command.getAttachments().isEmpty()) require(command.getMessage(), "message");
+        if(canceledTurns.contains(command.getTurnId())) return new AgentEvent(AgentEventType.TURN_INTERRUPTED,command.getTurnId(),
+                new TurnTerminalEventDTO(command.getConversationId(),command.getTurnId(),null,"已取消",0L));
         if (!turnPermits.tryAcquire()) {
             throw new AgentOperationException("AGENT_BUSY", "Agent has reached its concurrent Turn limit");
         }
@@ -98,6 +110,7 @@ public class AgentSessionManager {
         }
 
         ActiveTurn active = new ActiveTurn(command.getTurnId());
+        active.runner=Thread.currentThread();
         synchronized (session) {
             if (session.activeTurn != null) {
                 turnPermits.release();
@@ -109,13 +122,41 @@ public class AgentSessionManager {
 
         try {
             CodexEventListener listener = listener(session, active);
+            if(canceledTurns.contains(command.getTurnId()) || !acceptingTurns || connectionEpoch.get()!=epoch) active.preparation.cancel();
+            String message=attachments.prepare(command,active.preparation);
+            message=message+artifacts.instructions(command.getTurnId());
+            active.preparation.check();
+            if(!command.getAttachments().isEmpty() && !attemptedAttachmentTurns.add(command.getTurnId()))
+                throw new AgentOperationException("TURN_ALREADY_ATTEMPTED","附件 Turn 不能重复启动");
+            attachments.claim(command);
+            synchronized(active) {active.preparation.check(); active.launching=true;}
+            if(!command.getAttachments().isEmpty()) listener.onEvent(new CodexEvent(com.myharness.agent.entity.enums.TurnEventType.ITEM_COMPLETED,
+                    "attachment-preparation","附件已保存到项目，正在启动 Codex",null,null));
             String codexTurnId = codexGateway.startTurn(session.codexThreadId,
-                    new CodexTurnInput(command.getMessage(), command.getModel(), command.getReasoningEffort()), listener);
+                    new CodexTurnInput(message, command.getModel(), command.getReasoningEffort()), listener);
             active.codexTurnId = codexTurnId;
+            active.runner=null;
+            if(active.preparation.canceled()) {
+                codexGateway.interruptTurn(session.codexThreadId,codexTurnId);
+                finish(session,active);
+                return new AgentEvent(AgentEventType.TURN_INTERRUPTED,command.getTurnId(),
+                        new TurnTerminalEventDTO(command.getConversationId(),command.getTurnId(),codexTurnId,"已取消",active.eventSeq));
+            }
             return new AgentEvent(AgentEventType.TURN_STARTED, command.getTurnId(),
                     new TurnStartedEventDTO(command.getConversationId(), command.getTurnId(), codexTurnId));
         } catch (RuntimeException exception) {
-            finish(session, active);
+            try {
+                if(!command.getAttachments().isEmpty() && !active.preparation.canceled()) {
+                    listener(session,active).onEvent(new CodexEvent(com.myharness.agent.entity.enums.TurnEventType.WARNING,
+                            "attachment-preparation-error",exception.getMessage(),null,null));
+                }
+            } catch(RuntimeException publishFailure) {exception.addSuppressed(publishFailure);}
+            finally {finish(session, active);}
+            if(active.preparation.canceled()) {
+                Thread.interrupted();
+                return new AgentEvent(AgentEventType.TURN_INTERRUPTED,command.getTurnId(),
+                        new TurnTerminalEventDTO(command.getConversationId(),command.getTurnId(),active.codexTurnId,"附件准备已取消",active.eventSeq));
+            }
             throw exception;
         }
     }
@@ -123,7 +164,9 @@ public class AgentSessionManager {
     public void interruptTurn(InterruptTurnCommandDTO command) {
         require(command == null ? null : command.getConversationId(), "conversationId");
         require(command.getTurnId(), "turnId");
-        SessionContext session = session(command.getConversationId());
+        canceledTurns.add(command.getTurnId());
+        SessionContext session = sessions.get(command.getConversationId());
+        if(session==null) return;
         ActiveTurn active;
         synchronized (session) {
             active = session.activeTurn;
@@ -131,8 +174,13 @@ public class AgentSessionManager {
                 throw new AgentOperationException("TURN_NOT_RUNNING", "Turn is not active: " + command.getTurnId());
             }
         }
-        if (active.codexTurnId == null) {
-            throw new AgentOperationException("TURN_NOT_READY", "Turn has not received a Codex ID yet");
+        synchronized(active) {
+            active.preparation.cancel();
+            if (active.codexTurnId == null) {
+                Thread runner=active.runner;
+                if(runner!=null && !active.launching) runner.interrupt();
+                return;
+            }
         }
         codexGateway.interruptTurn(session.codexThreadId, active.codexTurnId);
     }
@@ -153,10 +201,21 @@ public class AgentSessionManager {
     }
 
     public void interruptAll() {
+        acceptingTurns=false; connectionEpoch.incrementAndGet();
         for (SessionContext session : sessions.values()) {
             ActiveTurn active;
             synchronized (session) {
                 active = session.activeTurn;
+            }
+            if(active!=null) {
+                synchronized(active) {
+                    canceledTurns.add(active.harnessTurnId);
+                    active.preparation.cancel();
+                    if(active.codexTurnId==null) {
+                        if(active.runner!=null && !active.launching) active.runner.interrupt();
+                        continue;
+                    }
+                }
             }
             if (active != null && active.codexTurnId != null) {
                 AgentEventType terminalType = AgentEventType.TURN_INTERRUPTED;
@@ -200,6 +259,17 @@ public class AgentSessionManager {
             @Override
             public void onCompleted(String codexTurnId, String status, String reason) {
                 synchronized (active) {
+                    if(active.finished.get()) return;
+                    if("completed".equals(status) && !active.preparation.canceled()) {
+                        try {
+                            int count=artifacts.capture(session.workspace,active.harnessTurnId);
+                            if(count>0) onEvent(new CodexEvent(com.myharness.agent.entity.enums.TurnEventType.ITEM_COMPLETED,
+                                    "artifact-publication","已准备 "+count+" 个交付文件，正在上传；完成后可在回答下下载",null,null));
+                        } catch(RuntimeException e) {
+                            onEvent(new CodexEvent(com.myharness.agent.entity.enums.TurnEventType.WARNING,
+                                    "artifact-publication-error",e.getMessage(),null,null));
+                        }
+                    }
                     if (!finish(session, active)) {
                         return;
                     }
@@ -338,6 +408,9 @@ public class AgentSessionManager {
     }
 
     private static final class ActiveTurn {
+        private final com.myharness.agent.attachment.AttachmentPreparation preparation=new com.myharness.agent.attachment.AttachmentPreparation();
+        private volatile Thread runner;
+        private volatile boolean launching;
         private long eventSeq;
         private final String harnessTurnId;
         private final AtomicBoolean finished = new AtomicBoolean();

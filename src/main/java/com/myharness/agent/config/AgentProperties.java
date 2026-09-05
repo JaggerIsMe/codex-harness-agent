@@ -17,6 +17,13 @@ import java.util.List;
 @Validated
 @ConfigurationProperties(prefix = "harness.agent")
 public class AgentProperties {
+    private long maxAttachmentBytes=20L*1024*1024;
+    private long maxTurnAttachmentBytes=50L*1024*1024;
+    public long getMaxAttachmentBytes(){return maxAttachmentBytes;}
+    public void setMaxAttachmentBytes(long value){maxAttachmentBytes=value;}
+    public long getMaxTurnAttachmentBytes(){return maxTurnAttachmentBytes;}
+    public void setMaxTurnAttachmentBytes(long value){maxTurnAttachmentBytes=value;}
+
 
     @NotNull
     private URI serverUrl;

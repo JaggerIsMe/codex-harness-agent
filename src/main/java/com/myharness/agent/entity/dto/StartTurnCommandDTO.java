@@ -1,6 +1,10 @@
 package com.myharness.agent.entity.dto;
 
 public class StartTurnCommandDTO {
+    private java.util.List<TurnAttachmentDTO> attachments=java.util.List.of();
+    public java.util.List<TurnAttachmentDTO> getAttachments(){return attachments==null ? java.util.List.of() : attachments;}
+    public void setAttachments(java.util.List<TurnAttachmentDTO> value){attachments=value;}
+
     private boolean recreateUnstartedThread;
     public boolean isRecreateUnstartedThread() { return recreateUnstartedThread; }
     public void setRecreateUnstartedThread(boolean value) { recreateUnstartedThread = value; }

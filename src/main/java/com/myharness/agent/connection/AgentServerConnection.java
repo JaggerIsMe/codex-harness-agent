@@ -118,6 +118,7 @@ public class AgentServerConnection extends AbstractWebSocketHandler implements S
         if (previous != null && previous != established) {
             closeQuietly(previous);
         }
+        sessionManager.connected();
         established.setTextMessageSizeLimit(MAX_TEXT_MESSAGE_BYTES);
         reconnectAttempt.set(0);
         cancelReconnect();
@@ -230,6 +231,7 @@ public class AgentServerConnection extends AbstractWebSocketHandler implements S
             return;
         }
         running = false;
+        if(session.get()!=null) sessionManager.interruptAll();
         cancelReconnect();
         if (heartbeatFuture != null) {
             heartbeatFuture.cancel(false);
