@@ -397,16 +397,18 @@ public class AgentSessionManager {
     private boolean prepareExpertThread(SessionContext session,StartTurnCommandDTO command,java.util.List<CodexSkillInput> skills,
                                          com.myharness.agent.attachment.AttachmentPreparation cancellation) {
         var runtime=command.getExpertRuntime();
-        if((runtime.getSchemaVersion()!=2 && runtime.getSchemaVersion()!=3) || runtime.getRuntimeKey()==null || !runtime.getRuntimeKey().matches("[0-9a-f]{64}"))
+        if((runtime.getSchemaVersion()!=2 && runtime.getSchemaVersion()!=3 && runtime.getSchemaVersion()!=4) || runtime.getRuntimeKey()==null || !runtime.getRuntimeKey().matches("[0-9a-f]{64}"))
             throw new AgentOperationException("EXPERT_CONFIG_INVALID","需要受支持的会话专家运行标识");
-        if(runtime.getSchemaVersion()==3 && session.expertId!=null && !session.expertId.equals(runtime.getExpertId()))
+        if(runtime.getSchemaVersion()>=3 && session.expertId!=null && !session.expertId.equals(runtime.getExpertId()))
             throw new AgentOperationException("CONVERSATION_BINDING_MISMATCH","Conversation 不能切换到另一个 Expert");
-        var options=new CodexThreadOptions(session.projectId,session.workspace,command.getModel()).withExpertSkills(skills);
+        var options=new CodexThreadOptions(session.projectId,session.workspace,command.getModel())
+                .withExpertRuntime(skills,runtime.getMcpServers()==null ? java.util.List.of() : runtime.getMcpServers());
         if(java.util.Objects.equals(session.runtimeKey,runtime.getRuntimeKey())) {
             try {codexGateway.resumeThread(session.codexThreadId,options);session.expertId=runtime.getExpertId();return session.needsHistory;}
             catch(CodexThreadNotLoadedException missing) {if(!command.isRecreateUnstartedThread()) throw missing;}
         }
-        if(runtime.getSchemaVersion()==3 && runtime.isCompatibleUpgrade() && runtime.getExpertId()!=null) {
+        if(session.runtimeKey!=null && runtime.getSchemaVersion()>=3
+                && runtime.isCompatibleUpgrade() && runtime.getExpertId()!=null) {
             cancellation.check();String previousKey=session.runtimeKey;
             try {
                 codexGateway.resumeThread(session.codexThreadId,options);

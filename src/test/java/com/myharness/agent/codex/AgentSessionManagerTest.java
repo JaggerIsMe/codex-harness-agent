@@ -79,6 +79,29 @@ class AgentSessionManagerTest {
         assertEquals("b".repeat(64),updated.expertRuntimeKey());
         assertEquals(List.of("codex-thread-1"),gateway.closedThreads);
     }
+    @Test void compatibilityFlagOnInitialExpertBindingStartsTheExpertThreadBeforeResumingIt() {
+        manager.startThread(thread("3"));
+        var first=expertTurn("7","a","codex-thread-1",null);
+        first.getExpertRuntime().setCompatibleUpgrade(true);
+
+        manager.startTurn(first);
+
+        assertEquals(0,gateway.resumeCount);
+        assertEquals(2,gateway.threadSequence);
+        assertEquals("codex-thread-2",gateway.startedTurnThreadId);
+        assertEquals(AgentEventType.THREAD_STARTED,events.getFirst().getType());
+    }
+    @Test void restartingAgentAppliesCompatibleUpgradeToThePersistedExpertThread() {
+        var upgraded=expertTurn("7","b","persisted-thread","a");
+        upgraded.getExpertRuntime().setCompatibleUpgrade(true);
+
+        manager.startTurn(upgraded);
+
+        assertEquals(0,gateway.threadSequence);
+        assertEquals(1,gateway.resumeCount);
+        assertEquals("persisted-thread",gateway.startedTurnThreadId);
+        assertEquals(AgentEventType.EXPERT_RUNTIME_UPDATED,events.getFirst().getType());
+    }
     @Test void compatibleFlagCannotSwitchAnExistingConversationToAnotherExpert() {
         manager.startThread(thread("3"));manager.startTurn(expertTurn("7","a","codex-thread-1",null));
         gateway.listener.onCompleted("codex-turn-1","completed",null);events.clear();

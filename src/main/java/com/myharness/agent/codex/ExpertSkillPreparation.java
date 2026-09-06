@@ -18,12 +18,13 @@ public class ExpertSkillPreparation {
     public synchronized List<CodexSkillInput> prepare(StartTurnCommandDTO turn, AttachmentPreparation cancellation) {
         var runtime=turn.getExpertRuntime();
         if(runtime==null) return List.of();
-        if((runtime.getSchemaVersion()!=2 && runtime.getSchemaVersion()!=3) || runtime.getProjectRevision()==null || runtime.getSkills()==null || runtime.getSkills().size()>30
+        if((runtime.getSchemaVersion()!=2 && runtime.getSchemaVersion()!=3 && runtime.getSchemaVersion()!=4) || runtime.getProjectRevision()==null || runtime.getSkills()==null || runtime.getSkills().size()>30
+                || (runtime.getSchemaVersion()==4 && (runtime.getMcpServers()==null || runtime.getMcpServers().size()>20))
                 || runtime.getRuntimeKey()==null || !runtime.getRuntimeKey().matches("[0-9a-f]{64}"))
-            throw new AgentOperationException("EXPERT_CONFIG_INVALID","专家运行配置无效，请同步升级服务端和 Agent 到会话隔离协议 V3");
+            throw new AgentOperationException("EXPERT_CONFIG_INVALID","专家运行配置无效，请同步升级服务端和 Agent 到会话隔离协议 V4");
         if(runtime.getProjectRevision()<0 || (runtime.getExpertVersionId()!=null && (runtime.getSystemPrompt()==null || runtime.getSystemPrompt().isBlank()))
-                || (runtime.getExpertVersionId()==null && (runtime.getSystemPrompt()!=null || !runtime.getSkills().isEmpty()))
-                || (runtime.getSchemaVersion()==3 && runtime.getExpertVersionId()!=null && runtime.getExpertId()==null))
+                || (runtime.getExpertVersionId()==null && (runtime.getSystemPrompt()!=null || !runtime.getSkills().isEmpty() || !runtime.getMcpServers().isEmpty()))
+                || (runtime.getSchemaVersion()>=3 && runtime.getExpertVersionId()!=null && runtime.getExpertId()==null))
             throw new AgentOperationException("EXPERT_CONFIG_INVALID","专家版本与指令不一致");
         if(turn.getTurnId()==null) throw new AgentOperationException("EXPERT_CONFIG_INVALID","缺少专家运行标识");
         if(turn.getConversationId()==null || !turn.getConversationId().matches("[A-Za-z0-9_-]{1,64}"))

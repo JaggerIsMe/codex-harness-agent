@@ -22,7 +22,104 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class AppServerCodexAdapterTest {
-    @Test void refreshesDiscoveryAndInvokesBoundSkillByNativeNameAndPath(@TempDir Path workspace) throws Exception {
+    @Test void rejectsRemovedHttpEnvironmentMappingFields() {
+        var mapper=new ObjectMapper();
+        assertThrows(Exception.class,() -> mapper.readValue("{\"serverCode\":\"remote\",\"envHttpHeaders\":{\"X-Key\":\"MCP_KEY\"}}",
+                com.myharness.agent.entity.dto.McpRuntimeDTO.class));
+        assertThrows(Exception.class,() -> mapper.readValue("{\"serverCode\":\"remote\",\"bearerTokenEnvVar\":\"MCP_TOKEN\"}",
+                com.myharness.agent.entity.dto.McpRuntimeDTO.class));
+    }
+    @Test void mapsPinnedMcpRuntimeIntoThreadConfiguration(@TempDir Path workspace) {
+        var stdio=new com.myharness.agent.entity.dto.McpRuntimeDTO();stdio.setServerCode("github");stdio.setTransportType("STDIO");
+        stdio.setCommand("npx");stdio.setArgs(List.of("-y","server"));stdio.setEnvVars(List.of("GITHUB_TOKEN"));
+        stdio.setCwdMode("WORKSPACE");stdio.setStartupTimeoutSeconds(12);stdio.setToolTimeoutSeconds(90);stdio.setRequired(true);
+        stdio.setEnabledTools(List.of("search"));stdio.setDisabledTools(List.of("delete"));
+        var http=new com.myharness.agent.entity.dto.McpRuntimeDTO();http.setServerCode("remote");http.setTransportType("STREAMABLE_HTTP");
+        http.setUrl("https://mcp.example.com/mcp");http.setHttpHeaders(java.util.Map.of("X-Mcp-Key","literal-secret"));
+        var options=new CodexThreadOptions("project",workspace,null).withExpertRuntime(List.of(),List.of(stdio,http));
+        ObjectNode params=new ObjectMapper().createObjectNode();params.putObject("config").put("existing",true);
+
+        new AppServerCodexAdapter(new AgentProperties(),new ObjectMapper()).configureMcpServers(params,options);
+
+        assertEquals("user",params.path("config").path("approvals_reviewer").asText());
+        JsonNode github=params.path("config").path("mcp_servers").path("github");
+        assertEquals("npx",github.path("command").asText());assertEquals(workspace.toString(),github.path("cwd").asText());
+        assertEquals("approve",github.path("default_tools_approval_mode").asText());
+        assertEquals("GITHUB_TOKEN",github.path("env_vars").get(0).asText());assertEquals("search",github.path("enabled_tools").get(0).asText());
+        JsonNode remote=params.path("config").path("mcp_servers").path("remote");
+        assertEquals("approve",remote.path("default_tools_approval_mode").asText());
+        assertEquals("literal-secret",remote.path("http_headers").path("X-Mcp-Key").asText());
+        assertFalse(remote.has("bearer_token_env_var"));assertFalse(remote.has("env_http_headers"));
+        assertTrue(params.path("config").path("existing").asBoolean());
+    }
+    @Test void explicitlyDisablesInheritedMcpServersForManagedExpert(@TempDir Path workspace) {
+        var options=new CodexThreadOptions("project",workspace,null).withExpertRuntime(List.of(),List.of());
+        ObjectNode params=new ObjectMapper().createObjectNode();
+        var adapter=new AppServerCodexAdapter(new AgentProperties(),new ObjectMapper()) {
+            @Override JsonNode request(String method,JsonNode input) {
+                assertEquals("mcpServerStatus/list",method);
+                ObjectNode result=new ObjectMapper().createObjectNode();result.putNull("nextCursor");
+                result.putArray("data").addObject().put("name","user-global").put("runtimeStatus","connected");return result;
+            }
+        };
+        adapter.configureMcpServers(params,options);
+
+        adapter.disableInheritedMcpServers(params,options);
+
+        JsonNode disabled=params.path("config").path("mcp_servers").path("user-global");
+        assertFalse(disabled.path("enabled").asBoolean(true));
+        assertEquals("harness-disabled-mcp",disabled.path("command").asText(),
+                "a disabled session override still needs a parseable transport discriminator");
+        assertFalse(disabled.has("args"));
+        assertFalse(disabled.has("env"));
+        assertFalse(disabled.has("http_headers"));
+    }
+    @Test void acceptsNullRuntimeStatusForDisabledInheritedMcp(@TempDir Path workspace) {
+        var mapper=new ObjectMapper();
+        int[] statusRequests={0};
+        var adapter=new AppServerCodexAdapter(new AgentProperties(),mapper) {
+            @Override JsonNode request(String method,JsonNode input) {
+                ObjectNode result=mapper.createObjectNode();
+                if("mcpServerStatus/list".equals(method)) {
+                    ObjectNode status=result.putArray("data").addObject().put("name","user-global");
+                    if(++statusRequests[0]>1) status.putNull("runtimeStatus");
+                    else status.put("runtimeStatus","connected");
+                    result.putNull("nextCursor");
+                    return result;
+                }
+                if("skills/extraRoots/set".equals(method)) return result;
+                if("thread/start".equals(method)) {
+                    result.putObject("activePermissionProfile").put("id",input.path("permissions").asText());
+                    result.putObject("thread").put("id","managed-thread");
+                    return result;
+                }
+                throw new AssertionError("Unexpected RPC: "+method);
+            }
+        };
+        var options=new CodexThreadOptions("project",workspace,null).withExpertRuntime(List.of(),List.of());
+
+        assertEquals("managed-thread",adapter.startThread(options));
+    }
+    @Test void doesNotSerializeCodexAppsPseudoTransportAsAStandardMcpOverride(@TempDir Path workspace) {
+        var options=new CodexThreadOptions("project",workspace,null).withExpertRuntime(List.of(),List.of());
+        ObjectNode params=new ObjectMapper().createObjectNode();
+        var adapter=new AppServerCodexAdapter(new AgentProperties(),new ObjectMapper()) {
+            @Override JsonNode request(String method,JsonNode input) {
+                assertEquals("mcpServerStatus/list",method);
+                ObjectNode result=new ObjectMapper().createObjectNode();result.putNull("nextCursor");
+                result.putArray("data").addObject().put("name","codex_apps").put("runtimeStatus","connected");return result;
+            }
+        };
+        adapter.configureMcpServers(params,options);
+
+        adapter.disableInheritedMcpServers(params,options);
+
+        assertFalse(params.path("config").path("features").path("apps").asBoolean(true),
+                "managed expert threads must disable the reserved Codex Apps MCP through its feature flag");
+        assertFalse(params.path("config").path("mcp_servers").has("codex_apps"),
+                "codex_apps is a special Apps transport and is invalid inside a standard mcp_servers session override");
+    }
+    @Test void refreshesDiscoveryAndLeavesBoundSkillAvailableWithoutChangingUserInput(@TempDir Path workspace) throws Exception {
         Path skill=workspace.resolve(".harness/expert-runtimes/1/runtime/skills/harness-expert-1-1/SKILL.md");
         Files.createDirectories(skill.getParent());
         Files.writeString(skill,"---\nname: hello-skill\ndescription: Use for greetings.\n---\nWhen greeted, reply HELLO_FROM_HARNESS_SKILL.");
@@ -35,9 +132,13 @@ class AppServerCodexAdapterTest {
         var request=adapter.params.getLast();
         String instructions=request.path("collaborationMode").path("settings").path("developer_instructions").asText();
         assertTrue(instructions.contains("Use the bound Skills"));
-        assertEquals("Hello\n\n$review",request.path("input").get(0).path("text").asText());
-        assertEquals("skill",request.path("input").get(1).path("type").asText());
-        assertEquals(skill.toRealPath().toString(),request.path("input").get(1).path("path").asText());
+        assertTrue(instructions.contains(skill.toRealPath().toString()));
+        assertTrue(instructions.contains("可选能力"));
+        assertTrue(instructions.contains("不要替换为用户目录或项目 .agents/skills 下的同名路径"));
+        assertEquals("Hello",request.path("input").get(0).path("text").asText());
+        assertEquals(1,request.path("input").size());
+        assertFalse(request.toString().contains("$review"));
+        assertFalse(request.toString().contains("\"type\":\"skill\""));
         assertEquals(List.of("skills/extraRoots/set","thread/read","thread/resume","skills/list","turn/start"),adapter.methods);
         assertTrue(adapter.params.get(3).path("forceReload").asBoolean());
     }
@@ -53,7 +154,7 @@ class AppServerCodexAdapterTest {
         adapter.startTurn("original-thread",new CodexTurnInput("second",null,null).withExpert("SQL expert",List.of(skill)),listener);
         adapter.startTurn("original-thread",new CodexTurnInput("third",null,null).withExpert(null,List.of()),listener);
         var first=adapter.params.get(4);var second=adapter.params.get(6);var cleared=adapter.params.get(8);
-        assertEquals("first\n\n$review",first.path("input").get(0).path("text").asText());
+        assertEquals("first",first.path("input").get(0).path("text").asText());
         assertTrue(first.path("collaborationMode").path("settings").path("developer_instructions").asText().contains("Java expert"));
         assertFalse(second.toString().contains("Java expert"));assertTrue(second.toString().contains("SQL expert"));
         assertTrue(cleared.path("collaborationMode").path("settings").path("developer_instructions").isNull());
@@ -113,7 +214,7 @@ class AppServerCodexAdapterTest {
         assertEquals(List.of("thread/read","thread/resume"),adapter.methods);
     }
     @Test
-    void restoresStoredThreadBeforeStartingTurnWithRestrictedWorkspace(@TempDir Path workspace) {
+    void restoresStoredThreadBeforeStartingTurnWithRestrictedWorkspaceAndInteractiveApprovals(@TempDir Path workspace) {
         var adapter = new StoredThreadAdapter(workspace);
         adapter.resumeThread("original-thread", new CodexThreadOptions("project", workspace, null));
         adapter.startTurn("original-thread", new CodexTurnInput("hello again", null, null),
@@ -124,19 +225,20 @@ class AppServerCodexAdapterTest {
         assertFalse(read.path("includeTurns").asBoolean());
         JsonNode resume = adapter.params.get(1);
         assertEquals("original-thread", resume.path("threadId").asText());
-        assertEquals("never", resume.path("approvalPolicy").asText());
+        assertEquals("on-request", resume.path("approvalPolicy").asText());
         assertFalse(resume.has("sandbox"));
         String profile=resume.path("permissions").asText();
+        assertEquals(profile,resume.path("config").path("default_permissions").asText());
         var policy=resume.path("config").path("permissions").path(profile);
-        assertEquals("deny",policy.path("filesystem").path(":root").asText());
-        assertEquals("read",policy.path("filesystem").path(":minimal").asText());
-        assertEquals("write",policy.path("filesystem").path(workspace.toString()).path(".").asText());
-        assertEquals("deny",policy.path("filesystem").path(":tmpdir").asText());
+        assertEquals(":workspace",policy.path("extends").asText());
+        assertEquals("write",policy.path("filesystem").path(":workspace_roots").path(".").asText());
+        assertEquals("read",policy.path("filesystem").path(":workspace_roots").path(".git").asText());
+        assertEquals("read",policy.path("filesystem").path(":workspace_roots").path(".codex").asText());
         assertFalse(policy.path("network").path("enabled").asBoolean());
         JsonNode turn = adapter.params.get(2);
         assertEquals("original-thread", turn.path("threadId").asText());
         assertEquals(workspace.toString(), turn.path("cwd").asText());
-        assertEquals("never", turn.path("approvalPolicy").asText());
+        assertEquals("on-request", turn.path("approvalPolicy").asText());
         assertFalse(turn.has("sandboxPolicy"));
         assertFalse(turn.has("permissions"), "Turns must inherit the verified thread policy, not reload an inline-only profile by name");
     }
@@ -178,11 +280,37 @@ class AppServerCodexAdapterTest {
         assertEquals(List.of("thread/read", "thread/read"), adapter.methods);
     }
 
+    @Test
+    void surfacesMcpToolCallApprovalAndReturnsTheSelectedAnswer(@TempDir Path workspace) {
+        var mapper=new ObjectMapper();var adapter=new StoredThreadAdapter(workspace);
+        var listener=org.mockito.Mockito.mock(CodexEventListener.class);
+        adapter.resumeThread("original-thread",new CodexThreadOptions("project",workspace,null));
+        adapter.startTurn("original-thread",new CodexTurnInput("query sales",null,null),listener);
+        ObjectNode request=mapper.createObjectNode().put("id","mcp-approval").put("method","item/tool/requestUserInput");
+        ObjectNode params=request.putObject("params").put("threadId","original-thread").put("turnId","new-turn")
+                .put("itemId","tool-1").put("isBlocking",true);
+        var question=params.putArray("questions").addObject().put("id","approval").put("header","Approval")
+                .put("question","Allow this MCP tool call?");
+        question.putArray("options").addObject().put("label","Accept").put("description","Run once");
+        question.withArray("options").addObject().put("label","Decline").put("description","Do not run");
+        question.withArray("options").addObject().put("label","Cancel").put("description","Stop");
+
+        adapter.handleMessage(request);
+
+        var approval=org.mockito.ArgumentCaptor.forClass(CodexApproval.class);
+        org.mockito.Mockito.verify(listener).onApproval(approval.capture());
+        assertEquals("MCP_TOOL_CALL",approval.getValue().getType().name());
+        adapter.resolveApproval("mcp-approval",com.myharness.agent.entity.enums.ApprovalDecision.ACCEPT);
+        JsonNode response=adapter.writes.getLast();
+        assertEquals("Accept",response.path("result").path("answers").path("approval").path("answers").get(0).asText());
+    }
+
     private static final class StoredThreadAdapter extends AppServerCodexAdapter {
         private final ObjectMapper mapper = new ObjectMapper();
         private final Path workspace;
         private final List<String> methods = new ArrayList<>();
         private final List<JsonNode> params = new ArrayList<>();
+        private final List<JsonNode> writes = new ArrayList<>();
         private boolean failResume;
         private boolean active;
         private boolean ignoreProfile;
@@ -223,6 +351,8 @@ class AppServerCodexAdapterTest {
             }
             return result;
         }
+
+        @Override void write(JsonNode message) { writes.add(message.deepCopy()); }
     }
 
     @Test

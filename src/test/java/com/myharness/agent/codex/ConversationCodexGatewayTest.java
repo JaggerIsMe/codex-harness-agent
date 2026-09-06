@@ -67,6 +67,22 @@ class ConversationCodexGatewayTest {
             gateway.resumeThread(id,options);assertTrue(processes.get(0).closed);assertEquals(id,processes.get(1).resumed);
         }
     }
+    @Test void changedMcpRuntimeReplacesOnlyTheProcessAndResumesTheSameThread() {
+        try(var gateway=gateway()) {
+            var first=options("a").withExpertRuntime(List.of(),List.of(mcp(1L,"a")));
+            String thread=gateway.startThread(first);
+            var next=options("a").withExpertRuntime(List.of(),List.of(mcp(2L,"b")));
+
+            gateway.resumeThread(thread,next);
+
+            assertTrue(processes.get(0).closed);assertEquals(2,processes.size());
+            assertEquals(thread,processes.get(1).resumed);assertEquals("2:b:github",processes.get(1).options.getMcpRuntimeKey());
+        }
+    }
+    private static com.myharness.agent.entity.dto.McpRuntimeDTO mcp(Long version,String digest) {
+        var value=new com.myharness.agent.entity.dto.McpRuntimeDTO();value.setConfigurationVersionId(version);
+        value.setConfigDigest(digest);value.setServerCode("github");return value;
+    }
     static final class Fake implements CodexGateway {
         final String id;CodexThreadOptions options;CodexTurnInput input;CodexEventListener listener;
         String resolved,resumed,interrupted;boolean closed,available=true;

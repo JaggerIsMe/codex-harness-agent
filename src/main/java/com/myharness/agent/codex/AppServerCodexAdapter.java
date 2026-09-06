@@ -32,6 +32,9 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 
 public class AppServerCodexAdapter implements CodexGateway {
+    private static final String CODEX_APPS_MCP_SERVER="codex_apps";
+    private static final String DISABLED_INHERITED_MCP_COMMAND="harness-disabled-mcp";
+    private static final String INTERACTIVE_APPROVAL_POLICY="on-request";
     private java.util.Set<Path> expertSkillPaths=java.util.Set.of();
     private static final Logger LOGGER = LoggerFactory.getLogger(AppServerCodexAdapter.class);
 
@@ -69,8 +72,10 @@ public class AppServerCodexAdapter implements CodexGateway {
         }
         ObjectNode params = objectMapper.createObjectNode();
         params.put("cwd", options.getWorkspace().toString());
-        params.put("approvalPolicy", "never");
+        params.put("approvalPolicy", INTERACTIVE_APPROVAL_POLICY);
         configureProjectPermissions(params, options.getWorkspace());
+        configureMcpServers(params,options);
+        disableInheritedMcpServers(params,options);
         params.put("ephemeral", false);
         if(options.isIsolatedExpertRuntime()) configureSkillRoots(options.getWorkspace(),options.getExpertSkills());
         if (hasText(options.getModel())) {
@@ -79,6 +84,7 @@ public class AppServerCodexAdapter implements CodexGateway {
         JsonNode result = request("thread/start", params);
         verifyPermissionProfile(result,options.getWorkspace());
         String threadId = requiredText(result.path("thread"), "id", "thread/start response");
+        verifyMcpIsolation(threadId,options);
         threadWorkspaces.put(threadId, options.getWorkspace());
         rememberModel(threadId,result,options.getModel());
         return threadId;
@@ -111,13 +117,16 @@ public class AppServerCodexAdapter implements CodexGateway {
         ObjectNode params = objectMapper.createObjectNode();
         params.put("threadId", threadId);
         params.put("cwd", options.getWorkspace().toString());
-        params.put("approvalPolicy", "never");
+        params.put("approvalPolicy", INTERACTIVE_APPROVAL_POLICY);
         configureProjectPermissions(params, options.getWorkspace());
+        configureMcpServers(params,options);
+        disableInheritedMcpServers(params,options);
         if (hasText(options.getModel())) params.put("model", options.getModel().trim());
         JsonNode resumeResult = request("thread/resume", params);
         verifyPermissionProfile(resumeResult,options.getWorkspace());
         JsonNode resumed = resumeResult.path("thread");
         verifyThreadBinding(resumed, threadId, options.getWorkspace());
+        verifyMcpIsolation(threadId,options);
         threadWorkspaces.put(threadId, options.getWorkspace());
         rememberModel(threadId,resumeResult,options.getModel());
     }
@@ -146,17 +155,27 @@ public class AppServerCodexAdapter implements CodexGateway {
         if(hasText(model)) threadModels.put(threadId,model);
     }
 
-    static void configureExpert(ObjectNode params, CodexTurnInput input, String defaultModel) {
+    static void configureExpert(ObjectNode params, CodexTurnInput input, String defaultModel,
+                                List<CodexSkillInput> verifiedSkills) {
         if(!input.isManagedExpert()) return;
         String model=input.getModel()==null || input.getModel().isBlank() ? defaultModel : input.getModel().trim();
         if(model==null || model.isBlank()) throw new CodexException("Codex 未返回运行模型，无法应用专家配置，请升级 Codex");
         ObjectNode settings=params.putObject("collaborationMode").put("mode","default").putObject("settings");
         settings.put("model",model);
-        String instructions=input.getExpertInstructions();
+        String instructions=expertInstructions(input.getExpertInstructions(),verifiedSkills);
         if(instructions==null) settings.putNull("developer_instructions");
         else settings.put("developer_instructions",instructions);
         if(input.getReasoningEffort()==null || input.getReasoningEffort().isBlank()) settings.putNull("reasoning_effort");
         else settings.put("reasoning_effort",input.getReasoningEffort());
+    }
+
+    private static String expertInstructions(String expertInstructions,List<CodexSkillInput> verifiedSkills) {
+        if(verifiedSkills.isEmpty()) return expertInstructions;
+        StringBuilder result=new StringBuilder("Harness 专家 Skill 运行规则：Skill 是可选能力，只有适用当前任务时才读取和使用。"
+                +"使用时必须直接读取以下绝对路径，不要替换为用户目录或项目 .agents/skills 下的同名路径，也不要先到其他 Skill 根目录查找。\n");
+        for(var skill:verifiedSkills) result.append("- ").append(skill.name()).append(": ").append(skill.path()).append('\n');
+        if(expertInstructions!=null && !expertInstructions.isBlank()) result.append("\n专家指令：\n").append(expertInstructions);
+        return result.toString();
     }
 
     private List<CodexSkillInput> refreshExpertSkills(Path workspace,CodexTurnInput input) {
@@ -208,17 +227,93 @@ public class AppServerCodexAdapter implements CodexGateway {
         String profile=profileId(workspace);
         params.put("permissions",profile);
         ObjectNode config=params.putObject("config");
+        config.put("default_permissions",profile);
         ObjectNode policy=config.putObject("permissions").putObject(profile);
+        policy.put("extends",":workspace");
         ObjectNode filesystem=policy.putObject("filesystem");
-        filesystem.put(":root","deny");
-        filesystem.put(":minimal","read");
-        filesystem.put(":tmpdir","deny");
-        filesystem.put(":slash_tmp","deny");
-        ObjectNode project=filesystem.putObject(workspace.toAbsolutePath().normalize().toString());
+        ObjectNode project=filesystem.putObject(":workspace_roots");
         project.put(".","write");
         project.put(".git","read");
         project.put(".codex","read");
         policy.putObject("network").put("enabled",false);
+    }
+
+    void configureMcpServers(ObjectNode params,CodexThreadOptions options) {
+        if(!options.isIsolatedExpertRuntime()) return;
+        JsonNode raw=params.get("config");
+        ObjectNode config=raw instanceof ObjectNode object ? object : params.putObject("config");
+        config.withObject("features").put("apps",false);
+        if(!options.getMcpServers().isEmpty()) {
+            // Harness, rather than Codex auto-review, owns the user-facing Approval Request flow.
+            config.put("approvals_reviewer","user");
+        }
+        ObjectNode servers=config.putObject("mcp_servers");
+        for(var runtime:options.getMcpServers()) {
+            String code=runtime.getServerCode();
+            if(code==null || !code.matches("[A-Za-z0-9_-]{1,64}")) throw new CodexException("MCP Server Code 不正确");
+            if(CODEX_APPS_MCP_SERVER.equals(code)) throw new CodexException("MCP Server Code codex_apps 是 Codex 保留名称");
+            ObjectNode server=servers.putObject(code);
+            if("STDIO".equals(runtime.getTransportType())) {
+                if(runtime.getCommand()==null || runtime.getCommand().isBlank()) throw new CodexException("MCP STDIO command 不能为空");
+                server.put("command",runtime.getCommand());ArrayNode args=server.putArray("args");
+                if(runtime.getArgs()!=null) runtime.getArgs().forEach(args::add);
+                ArrayNode env=server.putArray("env_vars");if(runtime.getEnvVars()!=null) runtime.getEnvVars().forEach(env::add);
+                if("WORKSPACE".equals(runtime.getCwdMode())) server.put("cwd",options.getWorkspace().toString());
+            } else if("STREAMABLE_HTTP".equals(runtime.getTransportType())) {
+                if(runtime.getUrl()==null || runtime.getUrl().isBlank()) throw new CodexException("MCP Streamable HTTP URL 不能为空");
+                server.put("url",runtime.getUrl());
+                ObjectNode headers=server.putObject("http_headers");
+                if(runtime.getHttpHeaders()!=null) runtime.getHttpHeaders().forEach(headers::put);
+            } else throw new CodexException("不支持的 MCP transport");
+            // Expert Versions pin an administrator-published MCP runtime and its tool allowlist.
+            // Code Mode does not forward nested MCP prompts to this App Server client, so prompting
+            // would be reported as a user rejection without producing a Harness Approval Request.
+            server.put("default_tools_approval_mode","approve");
+            server.put("startup_timeout_sec",runtime.getStartupTimeoutSeconds());
+            server.put("tool_timeout_sec",runtime.getToolTimeoutSeconds());server.put("enabled",true);server.put("required",runtime.isRequired());
+            if(runtime.getEnabledTools()!=null && !runtime.getEnabledTools().isEmpty()) {ArrayNode values=server.putArray("enabled_tools");runtime.getEnabledTools().forEach(values::add);}
+            if(runtime.getDisabledTools()!=null && !runtime.getDisabledTools().isEmpty()) {ArrayNode values=server.putArray("disabled_tools");runtime.getDisabledTools().forEach(values::add);}
+        }
+    }
+
+    void disableInheritedMcpServers(ObjectNode threadParams,CodexThreadOptions options) {
+        if(!options.isIsolatedExpertRuntime()) return;
+        java.util.Set<String> allowed=options.getMcpServers().stream().map(com.myharness.agent.entity.dto.McpRuntimeDTO::getServerCode)
+                .collect(java.util.stream.Collectors.toSet());
+        ObjectNode servers=(ObjectNode)threadParams.path("config").path("mcp_servers");
+        for(JsonNode status:mcpStatuses(null)) {
+            String name=status.path("name").asText();
+            if(CODEX_APPS_MCP_SERVER.equals(name)) continue;
+            if(!name.isBlank() && !allowed.contains(name)) {
+                // Session MCP overrides replace the complete server entry instead of deep-merging it.
+                // Keep the disabled entry parseable without copying inherited commands, arguments or secrets.
+                servers.putObject(name).put("command",DISABLED_INHERITED_MCP_COMMAND).put("enabled",false);
+            }
+        }
+    }
+
+    private void verifyMcpIsolation(String threadId,CodexThreadOptions options) {
+        if(!options.isIsolatedExpertRuntime()) return;
+        java.util.Set<String> allowed=options.getMcpServers().stream().map(com.myharness.agent.entity.dto.McpRuntimeDTO::getServerCode)
+                .collect(java.util.stream.Collectors.toSet());
+        for(JsonNode status:mcpStatuses(threadId)) {
+            String name=status.path("name").asText();JsonNode runtime=status.get("runtimeStatus");
+            boolean disabled=runtime==null || runtime.isNull() || "disabled".equals(runtime.asText());
+            if(!allowed.contains(name) && !disabled)
+                throw new CodexException("检测到未由当前 Expert 授权的 MCP Server："+name);
+        }
+    }
+
+    private List<JsonNode> mcpStatuses(String threadId) {
+        List<JsonNode> result=new ArrayList<>();String cursor=null;
+        do {
+            ObjectNode params=objectMapper.createObjectNode();params.put("detail","toolsAndAuthOnly");params.put("limit",1000);
+            if(threadId==null) params.putNull("threadId"); else params.put("threadId",threadId);
+            if(cursor==null) params.putNull("cursor"); else params.put("cursor",cursor);
+            JsonNode response=request("mcpServerStatus/list",params);
+            response.path("data").forEach(result::add);cursor=response.path("nextCursor").isTextual()?response.path("nextCursor").asText():null;
+        } while(cursor!=null && !cursor.isBlank());
+        return result;
     }
 
     private void verifyPermissionProfile(JsonNode response,Path workspace) {
@@ -245,16 +340,13 @@ public class AppServerCodexAdapter implements CodexGateway {
         ObjectNode params = objectMapper.createObjectNode();
         params.put("threadId", threadId);
         params.put("cwd", workspace.toString());
-        params.put("approvalPolicy", "never");
+        params.put("approvalPolicy", INTERACTIVE_APPROVAL_POLICY);
         // Inherit the profile already verified on thread/start or thread/resume.
         // A turn-level profile name triggers a fresh config load without the thread's inline permissions table.
         ArrayNode inputs = params.putArray("input");
         ObjectNode text = inputs.addObject();
         text.put("type", "text");
-        String message=input.getMessage();
-        if(!expertSkills.isEmpty()) message+="\n\n"+expertSkills.stream().map(skill->"$"+skill.name()).collect(java.util.stream.Collectors.joining(" "));
-        text.put("text", message);
-        for(var skill:expertSkills) inputs.addObject().put("type","skill").put("name",skill.name()).put("path",skill.path());
+        text.put("text", input.getMessage());
         if (hasText(input.getModel())) {
             params.put("model", input.getModel().trim());
         }
@@ -262,7 +354,7 @@ public class AppServerCodexAdapter implements CodexGateway {
             params.put("effort", input.getReasoningEffort().trim());
         }
 
-        configureExpert(params,input,threadModels.get(threadId));
+        configureExpert(params,input,threadModels.get(threadId),expertSkills);
         listenersByThread.put(threadId, listener);
         try {
             JsonNode result = request("turn/start", params);
@@ -300,7 +392,8 @@ public class AppServerCodexAdapter implements CodexGateway {
         response.put("jsonrpc", "2.0");
         response.set("id", approval.jsonRpcId);
         ObjectNode result = response.putObject("result");
-        result.put("decision", toCodexDecision(decision));
+        if(approval.type==ApprovalType.MCP_TOOL_CALL) writeToolInputDecision(result,approval.params,decision);
+        else result.put("decision", toCodexDecision(decision));
         write(response);
     }
 
@@ -440,7 +533,7 @@ public class AppServerCodexAdapter implements CodexGateway {
         }
     }
 
-    private void handleMessage(JsonNode message) {
+    void handleMessage(JsonNode message) {
         JsonNode id = message.get("id");
         String method = textOrNull(message, "method");
         if (id != null && method == null) {
@@ -477,11 +570,13 @@ public class AppServerCodexAdapter implements CodexGateway {
             type = ApprovalType.COMMAND_EXECUTION;
         } else if ("item/fileChange/requestApproval".equals(method)) {
             type = ApprovalType.FILE_CHANGE;
+        } else if ("item/tool/requestUserInput".equals(method)) {
+            type = ApprovalType.MCP_TOOL_CALL;
         } else {
             sendUnsupportedRequest(id, method);
             return;
         }
-        if (properties.isStrictProjectIsolation()) {
+        if (properties.isStrictProjectIsolation() && type!=ApprovalType.MCP_TOOL_CALL) {
             ObjectNode response=objectMapper.createObjectNode();
             response.put("jsonrpc","2.0"); response.set("id",id.deepCopy());
             response.putObject("result").put("decision","decline");
@@ -490,7 +585,7 @@ public class AppServerCodexAdapter implements CodexGateway {
             return;
         }
         String requestId = id.asText();
-        PendingApproval approval = new PendingApproval(id.deepCopy(), type);
+        PendingApproval approval = new PendingApproval(id.deepCopy(),type,params.deepCopy());
         if (pendingApprovals.putIfAbsent(requestId, approval) != null) {
             sendErrorResponse(id, -32600, "Duplicate approval request ID");
             return;
@@ -615,7 +710,7 @@ public class AppServerCodexAdapter implements CodexGateway {
         write(response);
     }
 
-    private void write(JsonNode message) {
+    void write(JsonNode message) {
         BufferedWriter currentWriter = writer;
         if (currentWriter == null) {
             throw new CodexException("Codex App Server is not running");
@@ -716,6 +811,33 @@ public class AppServerCodexAdapter implements CodexGateway {
         }
     }
 
+    private void writeToolInputDecision(ObjectNode result,JsonNode params,ApprovalDecision decision) {
+        ObjectNode answers=result.putObject("answers");
+        JsonNode questions=params.path("questions");
+        if(!questions.isArray() || questions.isEmpty()) throw new CodexException("MCP approval request has no questions");
+        for(JsonNode question:questions) {
+            String id=requiredText(question,"id","MCP approval question");
+            String answer=approvalOption(question.path("options"),decision);
+            answers.putObject(id).putArray("answers").add(answer);
+        }
+    }
+
+    private String approvalOption(JsonNode options,ApprovalDecision decision) {
+        if(!options.isArray() || options.isEmpty()) throw new CodexException("MCP approval question has no selectable options");
+        String[] preferred=switch(decision) {
+            case ACCEPT -> new String[]{"accept","approve","allow","yes"};
+            case ACCEPT_FOR_SESSION -> new String[]{"session","always","remember"};
+            case DECLINE -> new String[]{"decline","deny","reject","no"};
+            case CANCEL -> new String[]{"cancel","stop","abort"};
+        };
+        for(String term:preferred) for(JsonNode option:options) {
+            String label=option.path("label").asText();
+            if(label.toLowerCase(java.util.Locale.ROOT).contains(term)) return label;
+        }
+        if(decision==ApprovalDecision.ACCEPT_FOR_SESSION) return approvalOption(options,ApprovalDecision.ACCEPT);
+        throw new CodexException("MCP approval request does not offer the selected decision");
+    }
+
     private String requiredText(JsonNode node, String field, String source) {
         String value = node.path(field).asText(null);
         if (!hasText(value)) {
@@ -742,10 +864,12 @@ public class AppServerCodexAdapter implements CodexGateway {
     private static final class PendingApproval {
         private final JsonNode jsonRpcId;
         private final ApprovalType type;
+        private final JsonNode params;
 
-        private PendingApproval(JsonNode jsonRpcId, ApprovalType type) {
+        private PendingApproval(JsonNode jsonRpcId,ApprovalType type,JsonNode params) {
             this.jsonRpcId = jsonRpcId;
             this.type = type;
+            this.params = params;
         }
     }
 }

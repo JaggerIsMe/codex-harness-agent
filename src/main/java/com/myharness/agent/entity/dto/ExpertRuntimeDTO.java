@@ -1,7 +1,7 @@
 package com.myharness.agent.entity.dto;
 
 public class ExpertRuntimeDTO {
-    private int schemaVersion = 3;
+    private int schemaVersion = 4;
     private String runtimeKey;
     public String getRuntimeKey() { return runtimeKey; }
     public void setRuntimeKey(String value) { runtimeKey = value; }
@@ -12,6 +12,7 @@ public class ExpertRuntimeDTO {
     private String name;
     private String systemPrompt;
     private java.util.List<ExpertRuntimeSkillDTO> skills = java.util.List.of();
+    private java.util.List<McpRuntimeDTO> mcpServers = java.util.List.of();
     public int getSchemaVersion() { return schemaVersion; }
     public void setSchemaVersion(int value) { schemaVersion = value; }
     public Long getExpertVersionId() { return expertVersionId; }
@@ -28,4 +29,6 @@ public class ExpertRuntimeDTO {
     public void setSystemPrompt(String value) { systemPrompt = value; }
     public java.util.List<ExpertRuntimeSkillDTO> getSkills() { return skills; }
     public void setSkills(java.util.List<ExpertRuntimeSkillDTO> value) { skills = value; }
+    public java.util.List<McpRuntimeDTO> getMcpServers() { return mcpServers; }
+    public void setMcpServers(java.util.List<McpRuntimeDTO> value) { mcpServers = value; }
 }

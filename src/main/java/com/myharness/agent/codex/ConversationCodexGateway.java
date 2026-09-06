@@ -43,6 +43,16 @@ public class ConversationCodexGateway implements CodexGateway {
                 if(!existing.options.getWorkspace().equals(options.getWorkspace())
                         || !Objects.equals(existing.options.getProjectId(),options.getProjectId()))
                     throw new CodexException("Loaded conversation runtime does not match its project or workspace");
+                boolean sameMcp=existing.options.getMcpRuntimeKey().equals(options.getMcpRuntimeKey());
+                if(!sameMcp) {
+                    if(existing.active) throw new CodexException("Cannot update an active conversation runtime");
+                    Entry replaced=existing;
+                    threads.remove(id,replaced);approvals.entrySet().removeIf(value->value.getValue().entry==replaced);
+                    existing.gateway.close();CodexGateway replacement=factory.get();
+                    try {replacement.resumeThread(id,options);threads.put(id,new Entry(replacement,options));}
+                    catch(RuntimeException failure) {replacement.close();throw failure;}
+                    return;
+                }
                 boolean sameConfiguration=existing.options.getExpertSkills().equals(options.getExpertSkills())
                         && existing.options.isIsolatedExpertRuntime()==options.isIsolatedExpertRuntime();
                 if(!sameConfiguration) {

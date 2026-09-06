@@ -2,6 +2,7 @@ package com.myharness.agent.codex;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.myharness.agent.config.AgentProperties;
 import com.myharness.agent.entity.enums.TurnEventType;
 import org.junit.jupiter.api.Test;
@@ -14,6 +15,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
+import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -22,6 +24,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @EnabledIfSystemProperty(named = "codex.smoke", matches = "true")
@@ -80,11 +83,62 @@ class CodexAppServerSmokeTest {
         }
     }
 
+    @Test
+    @EnabledIfSystemProperty(named = "codex.turn.smoke", matches = "true")
+    void repliesWhenExpertSkillsAreAvailableWithoutBeingForced(@TempDir Path workspace) throws Exception {
+        Path skill=workspace.resolve(".harness/expert-runtimes/1/"+"a".repeat(64)+"/skills/harness-expert-1-1/SKILL.md");
+        java.nio.file.Files.createDirectories(skill.getParent());
+        java.nio.file.Files.writeString(skill,"---\nname: available-probe\ndescription: Optional expertise for Java code review.\n---\nReview Java code when requested.\n");
+        var available=List.of(new CodexSkillInput("available-probe",skill.toString()));
+        AgentProperties properties=new AgentProperties();properties.setCodexRequestTimeoutSeconds(45);
+        try(var adapter=new AppServerCodexAdapter(properties,new ObjectMapper())) {
+            String threadId=adapter.startThread(new CodexThreadOptions("expert-turn-smoke",workspace,null).withExpertSkills(available));
+            assertReply(adapter,threadId,new CodexTurnInput(
+                    "Reply with exactly HARNESS_OK. Do not use tools or inspect files.",null,null)
+                    .withExpert("Answer the user's request directly. Skills are optional capabilities.",available));
+        }
+    }
+
+    @Test
+    void startsThreadWithReachableLiteralHttpHeaderMcpConfiguration(@TempDir Path workspace) throws Exception {
+        var receivedHeader=new CompletableFuture<String>();
+        var server=com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);
+        server.createContext("/mcp",exchange -> {
+            receivedHeader.complete(exchange.getRequestHeaders().getFirst("X-Mcp-Key"));
+            JsonNode request=new ObjectMapper().readTree(exchange.getRequestBody());
+            if(!request.has("id")) {exchange.sendResponseHeaders(202,-1);exchange.close();return;}
+            ObjectNode response=new ObjectMapper().createObjectNode();response.put("jsonrpc","2.0");response.set("id",request.get("id"));
+            if("initialize".equals(request.path("method").asText())) {
+                var result=response.putObject("result");result.put("protocolVersion","2025-06-18").putObject("capabilities");
+                result.putObject("serverInfo").put("name","header-probe").put("version","1.0");
+            } else response.putObject("result").putArray("tools");
+            byte[] body=new ObjectMapper().writeValueAsBytes(response);exchange.getResponseHeaders().set("Content-Type","application/json");
+            exchange.sendResponseHeaders(200,body.length);exchange.getResponseBody().write(body);exchange.close();
+        });
+        server.start();
+        try {
+            var mcp=new com.myharness.agent.entity.dto.McpRuntimeDTO();
+            mcp.setServerCode("header-probe");mcp.setTransportType("STREAMABLE_HTTP");
+            mcp.setUrl("http://127.0.0.1:"+server.getAddress().getPort()+"/mcp");
+            mcp.setHttpHeaders(java.util.Map.of("X-Mcp-Key","probe-secret"));mcp.setRequired(true);
+            AgentProperties properties=new AgentProperties();properties.setCodexRequestTimeoutSeconds(15);
+            try(var adapter=new AppServerCodexAdapter(properties,new ObjectMapper())) {
+                String threadId=adapter.startThread(new CodexThreadOptions("mcp-header-start-smoke",workspace,null)
+                        .withExpertRuntime(List.of(),List.of(mcp)));
+                assertNotNull(threadId);assertEquals("probe-secret",receivedHeader.get(5,TimeUnit.SECONDS));
+            }
+        } finally {server.stop(0);}
+    }
+
     private void assertReply(AppServerCodexAdapter adapter, String threadId) throws Exception {
+        assertReply(adapter,threadId,new CodexTurnInput(
+                "Reply with exactly HARNESS_OK. Do not use tools or inspect files.",null,null));
+    }
+
+    private void assertReply(AppServerCodexAdapter adapter, String threadId, CodexTurnInput input) throws Exception {
         var completed = new CompletableFuture<String>();
         var text = new StringBuffer();
-        String turnId = adapter.startTurn(threadId,
-                new CodexTurnInput("Reply with exactly HARNESS_OK. Do not use tools or inspect files.", null, null),
+        String turnId = adapter.startTurn(threadId,input,
                 new CodexEventListener() {
                     public void onEvent(CodexEvent event) {
                         if (event.getType() == TurnEventType.AGENT_MESSAGE_DELTA) text.append(event.getContent());
