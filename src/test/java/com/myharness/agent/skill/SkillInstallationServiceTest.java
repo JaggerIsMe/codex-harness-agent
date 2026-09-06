@@ -27,6 +27,22 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class SkillInstallationServiceTest {
+    @Test void expertPackagesAreSharedWithinProjectButVersionedAndSeparateAcrossProjects() throws Exception {
+        Path archive=zip("SKILL.md","# Expert","asset.txt","shared");
+        var properties=properties(archive);var registry=mock(WorkspaceRegistry.class);
+        Path a=temporaryDirectory.resolve("project-a/.harness/expert-skills"),b=temporaryDirectory.resolve("project-b/.harness/expert-skills");
+        when(registry.resolve("a",".harness/expert-skills")).thenReturn(a);
+        when(registry.resolve("b",".harness/expert-skills")).thenReturn(b);
+        var downloads=new java.util.concurrent.atomic.AtomicInteger();
+        var service=new SkillInstallationService(properties,(url,target,max)->{try {Files.copy(archive,target);downloads.incrementAndGet();}catch(IOException e){throw new SkillException("copy",e);}},registry);
+        var first=install("7-10","1",archive);first.setScopeType("EXPERT");first.setWorkspaceName("a");
+        Path original=Path.of(service.install(first).getInstalledPath());
+        assertEquals(original,Path.of(service.install(first).getInstalledPath()));assertEquals(1,downloads.get());
+        var next=install("7-11","2",archive);next.setScopeType("EXPERT");next.setWorkspaceName("a");
+        assertFalse(original.equals(Path.of(service.install(next).getInstalledPath())));assertTrue(Files.exists(original.resolve("SKILL.md")));
+        first.setWorkspaceName("b");Path other=Path.of(service.install(first).getInstalledPath());
+        assertTrue(original.startsWith(a));assertTrue(other.startsWith(b));assertEquals(3,downloads.get());
+    }
     @TempDir
     Path temporaryDirectory;
 

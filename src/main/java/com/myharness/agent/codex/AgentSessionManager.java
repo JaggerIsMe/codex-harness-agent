@@ -11,6 +11,7 @@ import com.myharness.agent.entity.dto.ResolveApprovalCommandDTO;
 import com.myharness.agent.entity.dto.StartThreadCommandDTO;
 import com.myharness.agent.entity.dto.StartTurnCommandDTO;
 import com.myharness.agent.entity.dto.ThreadStartedEventDTO;
+import com.myharness.agent.entity.dto.ExpertRuntimeUpdatedEventDTO;
 import com.myharness.agent.entity.dto.TurnEventDTO;
 import com.myharness.agent.entity.dto.TurnStartedEventDTO;
 import com.myharness.agent.entity.dto.TurnTerminalEventDTO;
@@ -27,6 +28,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 @Component
 public class AgentSessionManager {
+    private final ExpertSkillPreparation expertSkills;
     private final CodexGateway codexGateway;
     private final com.myharness.agent.attachment.ConversationAttachmentService attachments;
     private final com.myharness.agent.artifact.ConversationArtifactService artifacts;
@@ -45,7 +47,8 @@ public class AgentSessionManager {
 
     public AgentSessionManager(CodexGateway codexGateway, WorkspaceRegistry workspaceRegistry,
                                AgentEventBus eventBus, AgentProperties properties, com.myharness.agent.attachment.ConversationAttachmentService attachments,
-                               com.myharness.agent.artifact.ConversationArtifactService artifacts) {
+                               com.myharness.agent.artifact.ConversationArtifactService artifacts, ExpertSkillPreparation expertSkills) {
+        this.expertSkills=expertSkills;
         this.codexGateway = codexGateway; this.attachments=attachments; this.artifacts=artifacts;
         this.workspaceRegistry = workspaceRegistry;
         this.eventBus = eventBus;
@@ -83,6 +86,7 @@ public class AgentSessionManager {
         SessionContext context = new SessionContext(command.getProjectId(),command.getConversationId(), codexThreadId, workspace);
         SessionContext existing = sessions.putIfAbsent(command.getConversationId(), context);
         if (existing != null) {
+            codexGateway.closeThread(codexThreadId);
             throw new AgentOperationException("CONVERSATION_ALREADY_STARTED",
                     "Conversation was started concurrently: " + command.getConversationId());
         }
@@ -125,6 +129,11 @@ public class AgentSessionManager {
             if(canceledTurns.contains(command.getTurnId()) || !acceptingTurns || connectionEpoch.get()!=epoch) active.preparation.cancel();
             String message=attachments.prepare(command,active.preparation);
             message=message+artifacts.instructions(command.getTurnId());
+            var preparedSkills=expertSkills.prepare(command,active.preparation);
+            active.preparation.check();
+            if(command.getExpertRuntime()!=null) {
+                prepareExpertThread(session,command,preparedSkills,active.preparation);
+            }
             active.preparation.check();
             if(!command.getAttachments().isEmpty() && !attemptedAttachmentTurns.add(command.getTurnId()))
                 throw new AgentOperationException("TURN_ALREADY_ATTEMPTED","附件 Turn 不能重复启动");
@@ -132,8 +141,10 @@ public class AgentSessionManager {
             synchronized(active) {active.preparation.check(); active.launching=true;}
             if(!command.getAttachments().isEmpty()) listener.onEvent(new CodexEvent(com.myharness.agent.entity.enums.TurnEventType.ITEM_COMPLETED,
                     "attachment-preparation","附件已保存到项目，正在启动 Codex",null,null));
-            String codexTurnId = codexGateway.startTurn(session.codexThreadId,
-                    new CodexTurnInput(message, command.getModel(), command.getReasoningEffort()), listener);
+            CodexTurnInput input=new CodexTurnInput(message, command.getModel(), command.getReasoningEffort());
+            if(command.getExpertRuntime()!=null) input.withExpert(command.getExpertRuntime().getSystemPrompt(),preparedSkills);
+            String codexTurnId = codexGateway.startTurn(session.codexThreadId,input,listener);
+            session.needsHistory=false;
             active.codexTurnId = codexTurnId;
             active.runner=null;
             if(active.preparation.canceled()) {
@@ -228,6 +239,7 @@ public class AgentSessionManager {
                 }
                 synchronized (active) {
                     if (finish(session, active)) {
+                        codexGateway.closeThread(session.codexThreadId);
                         eventBus.publish(new AgentEvent(terminalType, active.harnessTurnId,
                                 new TurnTerminalEventDTO(session.conversationId, active.harnessTurnId,
                                         active.codexTurnId, reason, active.eventSeq)));
@@ -328,6 +340,14 @@ public class AgentSessionManager {
                 throw new AgentOperationException("WORKSPACE_NOT_ALLOWED", exception.getMessage(), exception);
             }
             if (existing != null) {
+                if(existing.activeTurn==null && command.getExpertRuntime()!=null
+                        && command.getCodexThreadId().equals(existing.previousCodexThreadId)
+                        && existing.projectId.equals(command.getProjectId()) && existing.workspace.equals(workspace)) {
+                    // The Server may have rejected a replacement after cancellation; its next command is authoritative.
+                    codexGateway.closeThread(existing.codexThreadId);
+                    existing.codexThreadId=command.getCodexThreadId();existing.runtimeKey=command.getThreadRuntimeKey();
+                    existing.previousCodexThreadId=null;
+                }
                 if (!existing.projectId.equals(command.getProjectId())
                         || !existing.codexThreadId.equals(command.getCodexThreadId())
                         || !existing.workspace.equals(workspace)) {
@@ -343,6 +363,11 @@ public class AgentSessionManager {
             reserveProjectRoot(command.getProjectId(), workspace);
             try {
                 String restoredThreadId = command.getCodexThreadId();
+                if(command.getExpertRuntime()!=null) {
+                    SessionContext restored=new SessionContext(command.getProjectId(),command.getConversationId(),restoredThreadId,workspace);
+                    restored.runtimeKey=command.getThreadRuntimeKey();restored.needsHistory=command.isRecreateUnstartedThread();
+                    sessions.put(command.getConversationId(),restored);return restored;
+                }
                 var options = new CodexThreadOptions(command.getProjectId(), workspace, command.getModel());
                 try { codexGateway.resumeThread(restoredThreadId, options); }
                 catch (CodexThreadNotLoadedException missing) {
@@ -367,6 +392,46 @@ public class AgentSessionManager {
         if (value == null || value.trim().isEmpty()) {
             throw new AgentOperationException("INVALID_COMMAND", field + " must not be blank");
         }
+    }
+
+    private boolean prepareExpertThread(SessionContext session,StartTurnCommandDTO command,java.util.List<CodexSkillInput> skills,
+                                         com.myharness.agent.attachment.AttachmentPreparation cancellation) {
+        var runtime=command.getExpertRuntime();
+        if((runtime.getSchemaVersion()!=2 && runtime.getSchemaVersion()!=3) || runtime.getRuntimeKey()==null || !runtime.getRuntimeKey().matches("[0-9a-f]{64}"))
+            throw new AgentOperationException("EXPERT_CONFIG_INVALID","需要受支持的会话专家运行标识");
+        if(runtime.getSchemaVersion()==3 && session.expertId!=null && !session.expertId.equals(runtime.getExpertId()))
+            throw new AgentOperationException("CONVERSATION_BINDING_MISMATCH","Conversation 不能切换到另一个 Expert");
+        var options=new CodexThreadOptions(session.projectId,session.workspace,command.getModel()).withExpertSkills(skills);
+        if(java.util.Objects.equals(session.runtimeKey,runtime.getRuntimeKey())) {
+            try {codexGateway.resumeThread(session.codexThreadId,options);session.expertId=runtime.getExpertId();return session.needsHistory;}
+            catch(CodexThreadNotLoadedException missing) {if(!command.isRecreateUnstartedThread()) throw missing;}
+        }
+        if(runtime.getSchemaVersion()==3 && runtime.isCompatibleUpgrade() && runtime.getExpertId()!=null) {
+            cancellation.check();String previousKey=session.runtimeKey;
+            try {
+                codexGateway.resumeThread(session.codexThreadId,options);
+                cancellation.check();
+                eventBus.publish(new AgentEvent(AgentEventType.EXPERT_RUNTIME_UPDATED,command.getConversationId(),
+                        new ExpertRuntimeUpdatedEventDTO(command.getConversationId(),command.getTurnId(),session.codexThreadId,
+                                previousKey,runtime.getRuntimeKey())));
+                session.runtimeKey=runtime.getRuntimeKey();session.expertId=runtime.getExpertId();session.needsHistory=false;
+                return false;
+            } catch(CodexThreadNotLoadedException missing) {
+                if(!command.isRecreateUnstartedThread()) throw missing;
+            }
+        }
+        cancellation.check();String previous=session.codexThreadId;
+        String next=codexGateway.startThread(options);
+        try {
+            cancellation.check();
+            eventBus.publish(new AgentEvent(AgentEventType.THREAD_STARTED,command.getConversationId(),
+                    new ThreadStartedEventDTO(command.getConversationId(),next,previous,command.getTurnId())
+                            .withExpertRuntimeKey(runtime.getRuntimeKey())));
+        } catch(RuntimeException failure) {codexGateway.closeThread(next);throw failure;}
+        session.previousCodexThreadId=previous;session.codexThreadId=next;session.runtimeKey=runtime.getRuntimeKey();session.expertId=runtime.getExpertId();
+        session.needsHistory=true;
+        codexGateway.closeThread(previous);
+        return true;
     }
 
     private void reserveProjectRoot(String projectId,Path workspace) {
@@ -395,7 +460,11 @@ public class AgentSessionManager {
     private static final class SessionContext {
         private final String projectId;
         private final String conversationId;
-        private final String codexThreadId;
+        private volatile String codexThreadId;
+        private volatile String previousCodexThreadId;
+        private volatile String runtimeKey;
+        private volatile Long expertId;
+        private volatile boolean needsHistory;
         private final Path workspace;
         private volatile ActiveTurn activeTurn;
 

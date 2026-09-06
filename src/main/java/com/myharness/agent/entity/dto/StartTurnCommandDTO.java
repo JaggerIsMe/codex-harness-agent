@@ -1,6 +1,12 @@
 package com.myharness.agent.entity.dto;
 
 public class StartTurnCommandDTO {
+    private String threadRuntimeKey;
+    public String getThreadRuntimeKey() { return threadRuntimeKey; }
+    public void setThreadRuntimeKey(String value) { threadRuntimeKey=value; }
+    private ExpertRuntimeDTO expertRuntime;
+    public ExpertRuntimeDTO getExpertRuntime() {return expertRuntime;}
+    public void setExpertRuntime(ExpertRuntimeDTO value) {expertRuntime=value;}
     private java.util.List<TurnAttachmentDTO> attachments=java.util.List.of();
     public java.util.List<TurnAttachmentDTO> getAttachments(){return attachments==null ? java.util.List.of() : attachments;}
     public void setAttachments(java.util.List<TurnAttachmentDTO> value){attachments=value;}

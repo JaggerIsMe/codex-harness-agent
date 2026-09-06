@@ -24,7 +24,7 @@ public class RegisterEventDTO {
         this.workspaceRoots = workspaceRoots;
     }
 
-    public java.util.List<String> getCapabilities(){return java.util.List.of("CONVERSATION_ATTACHMENTS_V1","CONVERSATION_ARTIFACTS_V1");}
+    public java.util.List<String> getCapabilities(){return java.util.List.of("CONVERSATION_ATTACHMENTS_V1","CONVERSATION_ARTIFACTS_V1","CONVERSATION_EXPERTS_V3");}
     public String getDeviceName() { return deviceName; }
     public String getAgentVersion() { return agentVersion; }
     public String getOsName() { return osName; }

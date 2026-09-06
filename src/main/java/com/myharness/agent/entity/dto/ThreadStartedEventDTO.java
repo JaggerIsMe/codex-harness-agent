@@ -1,6 +1,9 @@
 package com.myharness.agent.entity.dto;
 
 public class ThreadStartedEventDTO {
+    private String expertRuntimeKey;
+    public String getExpertRuntimeKey() { return expertRuntimeKey; }
+    public ThreadStartedEventDTO withExpertRuntimeKey(String value) { expertRuntimeKey=value; return this; }
     private final String conversationId;
     private final String codexThreadId;
     private final String previousCodexThreadId;

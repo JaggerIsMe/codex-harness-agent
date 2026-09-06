@@ -64,7 +64,12 @@ public class SkillInstallationService {
         }
     }
 
-    public SkillResultEventDTO install(InstallSkillCommandDTO command) {
+    public synchronized SkillResultEventDTO install(InstallSkillCommandDTO command) {
+        return install(command,null);
+    }
+
+    public synchronized SkillResultEventDTO install(InstallSkillCommandDTO command, com.myharness.agent.attachment.AttachmentPreparation preparation) {
+        if(preparation!=null) preparation.check();
         validateInstall(command);
         String skillId = safeSegment(command.getSkillId(), "skillId");
         if (command.getSkillName() != null) safeSegment(command.getSkillName(), "skillName");
@@ -86,9 +91,10 @@ public class SkillInstallationService {
         Path extracted = operationDirectory.resolve("extracted");
         try {
             Files.createDirectories(extracted);
-            downloadClient.download(command.getDownloadUrl(), archive, megabytes(properties.getSkillMaxDownloadSizeMb()));
+            downloadClient.download(command.getDownloadUrl(), archive, megabytes(properties.getSkillMaxDownloadSizeMb()),preparation);
             verifySha256(archive, command.getSha256());
             extract(archive, extracted);
+            if(preparation!=null) preparation.check();
             Path skillRoot = findSkillRoot(extracted);
             Files.write(skillRoot.resolve(VERSION_MARKER), version.getBytes(StandardCharsets.UTF_8));
             Files.createDirectories(finalDirectory.getParent());
@@ -243,9 +249,10 @@ public class SkillInstallationService {
         validateScope(scopeType, workspaceName);
         if ("GLOBAL".equals(scopeType)) return skillsDirectory;
         try {
-            Path requested = workspaceRegistry.resolve(workspaceName, ".agents/skills");
+            String relative = "EXPERT".equals(scopeType) ? ".harness/expert-skills" : ".agents/skills";
+            Path requested = workspaceRegistry.resolve(workspaceName, relative);
             Files.createDirectories(requested);
-            return workspaceRegistry.resolve(workspaceName, ".agents/skills").toRealPath();
+            return workspaceRegistry.resolve(workspaceName, relative).toRealPath();
         } catch (IOException | RuntimeException exception) {
             throw new SkillException("Unable to prepare the project Skill directory", exception);
         }
@@ -253,9 +260,9 @@ public class SkillInstallationService {
 
     private void validateScope(String rawScopeType, String workspaceName) {
         String scopeType = rawScopeType == null ? "GLOBAL" : rawScopeType.trim();
-        if (!("GLOBAL".equals(scopeType) || "PROJECT".equals(scopeType)))
+        if (!("GLOBAL".equals(scopeType) || "PROJECT".equals(scopeType) || "EXPERT".equals(scopeType)))
             throw new SkillException("scopeType must be GLOBAL or PROJECT");
-        if ("PROJECT".equals(scopeType) && (workspaceName == null || workspaceName.trim().isEmpty()))
+        if (!"GLOBAL".equals(scopeType) && (workspaceName == null || workspaceName.trim().isEmpty()))
             throw new SkillException("workspaceName is required for a project Skill");
     }
 

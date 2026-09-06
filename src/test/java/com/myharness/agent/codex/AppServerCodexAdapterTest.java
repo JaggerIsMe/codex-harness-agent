@@ -22,6 +22,80 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class AppServerCodexAdapterTest {
+    @Test void refreshesDiscoveryAndInvokesBoundSkillByNativeNameAndPath(@TempDir Path workspace) throws Exception {
+        Path skill=workspace.resolve(".harness/expert-runtimes/1/runtime/skills/harness-expert-1-1/SKILL.md");
+        Files.createDirectories(skill.getParent());
+        Files.writeString(skill,"---\nname: hello-skill\ndescription: Use for greetings.\n---\nWhen greeted, reply HELLO_FROM_HARNESS_SKILL.");
+        var adapter=new StoredThreadAdapter(workspace);
+        adapter.configureSkillRoots(workspace,List.of(new CodexSkillInput("platform-name",skill.toString())));
+        adapter.resumeThread("original-thread",new CodexThreadOptions("project",workspace,"test-model"));
+        adapter.startTurn("original-thread",new CodexTurnInput("Hello",null,null)
+                .withExpert("Use the bound Skills when applicable.",List.of(new CodexSkillInput("hello-skill",skill.toString()))),
+                org.mockito.Mockito.mock(CodexEventListener.class));
+        var request=adapter.params.getLast();
+        String instructions=request.path("collaborationMode").path("settings").path("developer_instructions").asText();
+        assertTrue(instructions.contains("Use the bound Skills"));
+        assertEquals("Hello\n\n$review",request.path("input").get(0).path("text").asText());
+        assertEquals("skill",request.path("input").get(1).path("type").asText());
+        assertEquals(skill.toRealPath().toString(),request.path("input").get(1).path("path").asText());
+        assertEquals(List.of("skills/extraRoots/set","thread/read","thread/resume","skills/list","turn/start"),adapter.methods);
+        assertTrue(adapter.params.get(3).path("forceReload").asBoolean());
+    }
+    @Test void appliesEachExpertAndExplicitlyClearsInstructionsWithoutChangingWorkspace(@TempDir Path workspace) throws Exception {
+        var adapter=new StoredThreadAdapter(workspace);
+        adapter.resumeThread("original-thread",new CodexThreadOptions("project",workspace,"test-model"));
+        var listener=org.mockito.Mockito.mock(CodexEventListener.class);
+        var skill=new CodexSkillInput("review",workspace.resolve(".harness/expert-runtimes/1/runtime/skills/harness-expert-1-2/SKILL.md").toString());
+        Files.createDirectories(Path.of(skill.path()).getParent());
+        Files.writeString(Path.of(skill.path()),"# Review\nReview project code.");
+        adapter.configureSkillRoots(workspace,List.of(skill));
+        adapter.startTurn("original-thread",new CodexTurnInput("first",null,"high").withExpert("Java expert",List.of(skill)),listener);
+        adapter.startTurn("original-thread",new CodexTurnInput("second",null,null).withExpert("SQL expert",List.of(skill)),listener);
+        adapter.startTurn("original-thread",new CodexTurnInput("third",null,null).withExpert(null,List.of()),listener);
+        var first=adapter.params.get(4);var second=adapter.params.get(6);var cleared=adapter.params.get(8);
+        assertEquals("first\n\n$review",first.path("input").get(0).path("text").asText());
+        assertTrue(first.path("collaborationMode").path("settings").path("developer_instructions").asText().contains("Java expert"));
+        assertFalse(second.toString().contains("Java expert"));assertTrue(second.toString().contains("SQL expert"));
+        assertTrue(cleared.path("collaborationMode").path("settings").path("developer_instructions").isNull());
+        assertEquals("test-model",cleared.path("collaborationMode").path("settings").path("model").asText());
+        assertEquals(1,cleared.path("input").size());
+        assertFalse(cleared.toString().contains("Review project code."));
+        assertFalse(cleared.has("config"));assertEquals(workspace.toString(),cleared.path("cwd").asText());
+    }
+    @Test void refusesExpertExecutionWhenActualModelIsUnknown(@TempDir Path workspace) {
+        var adapter=new StoredThreadAdapter(workspace);
+        adapter.resumeThread("original-thread",new CodexThreadOptions("project",workspace,null));
+        assertThrows(CodexException.class,()->adapter.startTurn("original-thread",new CodexTurnInput("hello",null,null).withExpert("expert",List.of()),org.mockito.Mockito.mock(CodexEventListener.class)));
+        assertEquals(List.of("thread/read","thread/resume","skills/list"),adapter.methods);
+    }
+    @Test void refusesDisabledSkillBeforeStartingModelTurn(@TempDir Path workspace) throws Exception {
+        Path skill=workspace.resolve(".harness/expert-runtimes/1/runtime/skills/expert/SKILL.md");
+        Files.createDirectories(skill.getParent());Files.writeString(skill,"disabled");
+        var adapter=new StoredThreadAdapter(workspace);adapter.disabledSkill=true;
+        adapter.configureSkillRoots(workspace,List.of(new CodexSkillInput("review",skill.toString())));
+        adapter.resumeThread("original-thread",new CodexThreadOptions("project",workspace,"test-model"));
+        assertThrows(CodexException.class,()->adapter.startTurn("original-thread",new CodexTurnInput("hello",null,null)
+                .withExpert("expert",List.of(new CodexSkillInput("review",skill.toString()))),org.mockito.Mockito.mock(CodexEventListener.class)));
+        assertFalse(adapter.methods.contains("turn/start"));
+    }
+    @Test void refusesSkillAbsentFromNativeDiscoveryBeforeStartingModelTurn(@TempDir Path workspace) throws Exception {
+        Path skill=workspace.resolve(".harness/expert-runtimes/1/runtime/skills/expert/SKILL.md");
+        Files.createDirectories(skill.getParent());Files.writeString(skill,"not discovered");
+        var adapter=new StoredThreadAdapter(workspace);adapter.missingSkill=true;
+        adapter.configureSkillRoots(workspace,List.of(new CodexSkillInput("review",skill.toString())));
+        adapter.resumeThread("original-thread",new CodexThreadOptions("project",workspace,"test-model"));
+        assertThrows(CodexException.class,()->adapter.startTurn("original-thread",new CodexTurnInput("hello",null,null)
+                .withExpert("expert",List.of(new CodexSkillInput("review",skill.toString()))),org.mockito.Mockito.mock(CodexEventListener.class)));
+        assertFalse(adapter.methods.contains("turn/start"));
+    }
+    @Test void refusesExpertSkillOutsideCurrentProjectNativeDirectory(@TempDir Path root) throws Exception {
+        Path workspace=Files.createDirectory(root.resolve("project"));Path skill=root.resolve("SKILL.md");Files.writeString(skill,"other project");
+        var adapter=new StoredThreadAdapter(workspace);
+        adapter.resumeThread("original-thread",new CodexThreadOptions("project",workspace,"test-model"));
+        assertThrows(CodexException.class,()->adapter.startTurn("original-thread",new CodexTurnInput("hello",null,null)
+                .withExpert("expert",List.of(new CodexSkillInput("review",skill.toString()))),org.mockito.Mockito.mock(CodexEventListener.class)));
+        assertFalse(adapter.methods.contains("turn/start"));
+    }
     @Test void classifiesOnlyExactMissingThreadReadResponse(@TempDir Path workspace) {
         var adapter=new StoredThreadAdapter(workspace);
         adapter.readFailure=new CodexException("read failed",new CodexException("thread not loaded: original-thread"));
@@ -112,6 +186,8 @@ class AppServerCodexAdapterTest {
         private boolean failResume;
         private boolean active;
         private boolean ignoreProfile;
+        private boolean disabledSkill;
+        private boolean missingSkill;
         private CodexException readFailure;
 
         StoredThreadAdapter(Path workspace) {
@@ -132,6 +208,16 @@ class AppServerCodexAdapterTest {
             } else if ("turn/start".equals(method)) {
                 if (input.hasNonNull("permissions")) throw new CodexException("failed to load configuration: default_permissions requires a `[permissions]` table");
                 result.putObject("turn").put("id", "new-turn");
+            } else if ("skills/extraRoots/set".equals(method)) {
+                return result;
+            } else if ("skills/list".equals(method)) {
+                var group=result.putArray("data").addObject().put("cwd",workspace.toString());
+                var found=group.putArray("skills");
+                if(missingSkill) return result;
+                try(var files=Files.walk(workspace)) {
+                    for(var file:files.filter(p->p.getFileName().toString().equals("SKILL.md")).toList())
+                        found.addObject().put("path",file.toRealPath().toString()).put("name","review").put("enabled",!disabledSkill);
+                } catch(java.io.IOException failure) {throw new AssertionError(failure);}
             } else {
                 throw new AssertionError("Unexpected RPC: " + method);
             }

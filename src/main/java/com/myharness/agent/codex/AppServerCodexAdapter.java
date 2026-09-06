@@ -31,8 +31,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 
-@Component
 public class AppServerCodexAdapter implements CodexGateway {
+    private java.util.Set<Path> expertSkillPaths=java.util.Set.of();
     private static final Logger LOGGER = LoggerFactory.getLogger(AppServerCodexAdapter.class);
 
     private final AgentProperties properties;
@@ -42,6 +42,7 @@ public class AppServerCodexAdapter implements CodexGateway {
     private final Map<String, CodexEventListener> listenersByTurn = new ConcurrentHashMap<>();
     private final Map<String, CodexEventListener> listenersByThread = new ConcurrentHashMap<>();
     private final Map<String, Path> threadWorkspaces = new ConcurrentHashMap<>();
+    private final Map<String, String> threadModels = new ConcurrentHashMap<>();
     private final Map<String, PendingApproval> pendingApprovals = new ConcurrentHashMap<>();
     private final Map<String, String> messagePhasesByItem = new ConcurrentHashMap<>();
     private final Object lifecycleLock = new Object();
@@ -50,6 +51,8 @@ public class AppServerCodexAdapter implements CodexGateway {
     private volatile Process process;
     private volatile BufferedWriter writer;
     private volatile boolean closing;
+    private volatile boolean runtimeFailed;
+    @Override public boolean isAvailable() {return !runtimeFailed && process!=null && process.isAlive();}
 
     public AppServerCodexAdapter(AgentProperties properties, ObjectMapper objectMapper) {
         this.properties = properties;
@@ -69,6 +72,7 @@ public class AppServerCodexAdapter implements CodexGateway {
         params.put("approvalPolicy", "never");
         configureProjectPermissions(params, options.getWorkspace());
         params.put("ephemeral", false);
+        if(options.isIsolatedExpertRuntime()) configureSkillRoots(options.getWorkspace(),options.getExpertSkills());
         if (hasText(options.getModel())) {
             params.put("model", options.getModel().trim());
         }
@@ -76,6 +80,7 @@ public class AppServerCodexAdapter implements CodexGateway {
         verifyPermissionProfile(result,options.getWorkspace());
         String threadId = requiredText(result.path("thread"), "id", "thread/start response");
         threadWorkspaces.put(threadId, options.getWorkspace());
+        rememberModel(threadId,result,options.getModel());
         return threadId;
     }
 
@@ -88,6 +93,7 @@ public class AppServerCodexAdapter implements CodexGateway {
         if (properties.isStrictProjectIsolation() && !hasText(options.getProjectId())) {
             throw new CodexException("Project ID is required in strict project isolation mode");
         }
+        if(options.isIsolatedExpertRuntime()) configureSkillRoots(options.getWorkspace(),options.getExpertSkills());
         // Verify the persisted root before applying overrides: resume must not move another project's history.
         ObjectNode read = objectMapper.createObjectNode().put("threadId", threadId).put("includeTurns", false);
         JsonNode stored;
@@ -113,6 +119,7 @@ public class AppServerCodexAdapter implements CodexGateway {
         JsonNode resumed = resumeResult.path("thread");
         verifyThreadBinding(resumed, threadId, options.getWorkspace());
         threadWorkspaces.put(threadId, options.getWorkspace());
+        rememberModel(threadId,resumeResult,options.getModel());
     }
 
     private void verifyThreadBinding(JsonNode thread, String threadId, Path workspace) {
@@ -132,6 +139,68 @@ public class AppServerCodexAdapter implements CodexGateway {
     private String profileId(Path workspace) {
         return "harness-" + java.util.UUID.nameUUIDFromBytes(
                 workspace.toAbsolutePath().normalize().toString().getBytes(StandardCharsets.UTF_8)).toString().replace("-","");
+    }
+
+    private void rememberModel(String threadId, JsonNode response, String fallback) {
+        String model=response.path("model").asText(fallback);
+        if(hasText(model)) threadModels.put(threadId,model);
+    }
+
+    static void configureExpert(ObjectNode params, CodexTurnInput input, String defaultModel) {
+        if(!input.isManagedExpert()) return;
+        String model=input.getModel()==null || input.getModel().isBlank() ? defaultModel : input.getModel().trim();
+        if(model==null || model.isBlank()) throw new CodexException("Codex 未返回运行模型，无法应用专家配置，请升级 Codex");
+        ObjectNode settings=params.putObject("collaborationMode").put("mode","default").putObject("settings");
+        settings.put("model",model);
+        String instructions=input.getExpertInstructions();
+        if(instructions==null) settings.putNull("developer_instructions");
+        else settings.put("developer_instructions",instructions);
+        if(input.getReasoningEffort()==null || input.getReasoningEffort().isBlank()) settings.putNull("reasoning_effort");
+        else settings.put("reasoning_effort",input.getReasoningEffort());
+    }
+
+    private List<CodexSkillInput> refreshExpertSkills(Path workspace,CodexTurnInput input) {
+        if(!input.isManagedExpert()) return List.of();
+        ObjectNode params=objectMapper.createObjectNode();
+        params.putArray("cwds").add(workspace.toString());params.put("forceReload",true);
+        JsonNode response=request("skills/list",params);
+        List<CodexSkillInput> result=new ArrayList<>();
+        for(var expected:input.getSkills()) {
+            try {
+                Path path=Path.of(expected.path()).toRealPath();
+                if(!expertSkillPaths.contains(path))
+                    throw new CodexException("专家 Skill 不在当前会话运行实例的加载清单中");
+                JsonNode match=null;
+                for(var group:response.path("data")) for(var skill:group.path("skills")) {
+                    if(skill.hasNonNull("path") && Path.of(skill.path("path").asText()).toAbsolutePath().normalize().equals(path)) match=skill;
+                }
+                if(match==null || !match.path("enabled").asBoolean())
+                    throw new CodexException("Codex 未识别或已禁用项目专家 Skill："+expected.name()+"，请检查 SKILL.md 的名称、描述及格式");
+                String name=match.path("name").asText();
+                if(!name.matches("[A-Za-z0-9._:-]+")) throw new CodexException("专家 Skill 的声明名称不支持显式调用");
+                result.add(new CodexSkillInput(name,path.toString()));
+            } catch(IOException | java.nio.file.InvalidPathException failure) {throw new CodexException("无法校验项目专家 Skill："+expected.name(),failure);}
+        }
+        return List.copyOf(result);
+    }
+
+    void configureSkillRoots(Path workspace,List<CodexSkillInput> skills) {
+        try {
+            Path allowed=workspace.toRealPath().resolve(".harness/expert-runtimes");
+            java.util.Set<Path> paths=new java.util.LinkedHashSet<>();
+            java.util.Set<Path> roots=new java.util.LinkedHashSet<>();
+            for(var skill:skills) {
+                Path path=Path.of(skill.path()).toRealPath();
+                if(!path.startsWith(allowed) || !path.getFileName().toString().equals("SKILL.md"))
+                    throw new CodexException("专家 Skill 必须位于当前项目的会话运行目录");
+                paths.add(path);roots.add(path.getParent().getParent());
+            }
+            if(roots.size()>1) throw new CodexException("一次专家运行不能混合多个会话的技能目录");
+            ObjectNode params=objectMapper.createObjectNode();var values=params.putArray("extraRoots");
+            roots.forEach(path->values.add(path.toString()));
+            request("skills/extraRoots/set",params);
+            expertSkillPaths=java.util.Set.copyOf(paths);
+        } catch(IOException failure) {throw new CodexException("无法配置会话专家技能目录",failure);}
     }
 
     /** A concrete project path, not all Device workspaces, is allowed in this profile. */
@@ -172,6 +241,7 @@ public class AppServerCodexAdapter implements CodexGateway {
             throw new CodexException("Unknown Codex thread: " + threadId);
         }
 
+        List<CodexSkillInput> expertSkills=refreshExpertSkills(workspace,input);
         ObjectNode params = objectMapper.createObjectNode();
         params.put("threadId", threadId);
         params.put("cwd", workspace.toString());
@@ -181,7 +251,10 @@ public class AppServerCodexAdapter implements CodexGateway {
         ArrayNode inputs = params.putArray("input");
         ObjectNode text = inputs.addObject();
         text.put("type", "text");
-        text.put("text", input.getMessage());
+        String message=input.getMessage();
+        if(!expertSkills.isEmpty()) message+="\n\n"+expertSkills.stream().map(skill->"$"+skill.name()).collect(java.util.stream.Collectors.joining(" "));
+        text.put("text", message);
+        for(var skill:expertSkills) inputs.addObject().put("type","skill").put("name",skill.name()).put("path",skill.path());
         if (hasText(input.getModel())) {
             params.put("model", input.getModel().trim());
         }
@@ -189,11 +262,13 @@ public class AppServerCodexAdapter implements CodexGateway {
             params.put("effort", input.getReasoningEffort().trim());
         }
 
+        configureExpert(params,input,threadModels.get(threadId));
         listenersByThread.put(threadId, listener);
         try {
             JsonNode result = request("turn/start", params);
             String turnId = requiredText(result.path("turn"), "id", "turn/start response");
             listenersByTurn.put(turnId, listener);
+            if(hasText(input.getModel())) threadModels.put(threadId,input.getModel().trim());
             return turnId;
         } catch (RuntimeException exception) {
             listenersByThread.remove(threadId, listener);
@@ -274,6 +349,7 @@ public class AppServerCodexAdapter implements CodexGateway {
                 LOGGER.info("Starting Codex App Server with command {} in {}", command, System.getProperty("user.dir"));
                 Process started = new ProcessBuilder(command).start();
                 process = started;
+                runtimeFailed=false;
                 writer = new BufferedWriter(new OutputStreamWriter(started.getOutputStream(), StandardCharsets.UTF_8));
                 startReaders(started);
                 initialize();
@@ -556,6 +632,7 @@ public class AppServerCodexAdapter implements CodexGateway {
     }
 
     private void failRuntime(String message, Throwable cause) {
+        runtimeFailed=true;
         CodexException failure = cause == null ? new CodexException(message) : new CodexException(message, cause);
         for (CompletableFuture<JsonNode> future : pendingRequests.values()) {
             future.completeExceptionally(failure);
@@ -587,6 +664,7 @@ public class AppServerCodexAdapter implements CodexGateway {
         pendingApprovals.clear();
         messagePhasesByItem.clear();
         threadWorkspaces.clear();
+        threadModels.clear();
     }
 
     private void stopProcessTree(Process current) {

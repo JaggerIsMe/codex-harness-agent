@@ -26,11 +26,18 @@ public class ServerSkillDownloadAdapter implements SkillDownloadClient {
 
     @Override
     public void download(String downloadUrl, Path target, long maximumBytes) {
+        download(downloadUrl,target,maximumBytes,null);
+    }
+
+    @Override
+    public void download(String downloadUrl, Path target, long maximumBytes, com.myharness.agent.attachment.AttachmentPreparation preparation) {
         URI uri = validateUrl(downloadUrl);
         HttpURLConnection connection = null;
         try {
             DeviceIdentityVO identity = identityProvider.get();
             connection = (HttpURLConnection) uri.toURL().openConnection();
+            connection.setInstanceFollowRedirects(false);
+            if(preparation!=null) preparation.connection(connection);
             connection.setRequestMethod("GET");
             connection.setConnectTimeout(10_000);
             connection.setReadTimeout(60_000);
@@ -49,6 +56,7 @@ public class ServerSkillDownloadAdapter implements SkillDownloadClient {
                 long total = 0;
                 int count;
                 while ((count = input.read(buffer)) >= 0) {
+                    if(preparation!=null) preparation.check();
                     total += count;
                     if (total > maximumBytes) {
                         throw new SkillException("Skill archive exceeds the configured download limit");
@@ -59,6 +67,7 @@ public class ServerSkillDownloadAdapter implements SkillDownloadClient {
         } catch (IOException exception) {
             throw new SkillException("Unable to download Skill archive", exception);
         } finally {
+            if(preparation!=null) preparation.clear();
             if (connection != null) {
                 connection.disconnect();
             }

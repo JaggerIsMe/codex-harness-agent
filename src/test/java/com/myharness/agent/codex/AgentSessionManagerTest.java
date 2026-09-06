@@ -27,8 +27,81 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class AgentSessionManagerTest {
+    @Test void forwardsFrozenExpertAndExplicitClearOnConsecutiveTurns() {
+        manager.startThread(thread("3"));
+        var first=turn("3","7");var expert=new com.myharness.agent.entity.dto.ExpertRuntimeDTO();
+        expert.setProjectRevision(1L);expert.setRuntimeKey("a".repeat(64));expert.setExpertVersionId(100L);expert.setSystemPrompt("Java expert");first.setExpertRuntime(expert);
+        manager.startTurn(first);
+        assertEquals("Java expert",gateway.lastInput.getExpertInstructions());
+        var frozen=gateway.lastInput;
+        gateway.listener.onCompleted("codex-turn-1","completed",null);
+        var next=turn("3","8");var plain=new com.myharness.agent.entity.dto.ExpertRuntimeDTO();plain.setProjectRevision(1L);plain.setRuntimeKey("b".repeat(64));next.setExpertRuntime(plain);
+        manager.startTurn(next);
+        org.junit.jupiter.api.Assertions.assertTrue(gateway.lastInput.isManagedExpert());
+        org.junit.jupiter.api.Assertions.assertNull(gateway.lastInput.getExpertInstructions());
+        assertEquals("Java expert",frozen.getExpertInstructions());
+    }
     @TempDir
     Path temporaryDirectory;
+
+    @Test void switchesRuntimeOnlyWhenRuntimeChangesWithoutInjectingBusinessHistory() {
+        manager.startThread(thread("3"));
+        var first=expertTurn("7","a","codex-thread-1",null);
+        manager.startTurn(first);
+        assertEquals("codex-thread-2",gateway.startedTurnThreadId);
+        assertEquals("do work",gateway.lastInput.getMessage());
+        assertEquals("a".repeat(64),((com.myharness.agent.entity.dto.ThreadStartedEventDTO)events.getFirst().getPayload()).getExpertRuntimeKey());
+        gateway.listener.onCompleted("codex-turn-1","completed",null);events.clear();
+        var same=expertTurn("8","a","codex-thread-2","a");manager.startTurn(same);
+        assertEquals(2,gateway.threadSequence);assertEquals("do work",gateway.lastInput.getMessage());
+        gateway.listener.onCompleted("codex-turn-1","completed",null);events.clear();
+        var next=expertTurn("9","b","codex-thread-2","a");next.getExpertRuntime().setExpertVersionId(200L);
+        manager.startTurn(next);assertEquals("codex-thread-3",gateway.startedTurnThreadId);
+        assertEquals(List.of("codex-thread-1","codex-thread-2"),gateway.closedThreads);
+    }
+    @Test void restartingAgentRestoresSameExpertThread() {
+        var command=expertTurn("7","a","persisted-thread","a");
+        manager.startTurn(command);assertEquals(0,gateway.threadSequence);assertEquals("persisted-thread",gateway.resumedThreadId);
+        assertEquals("do work",gateway.lastInput.getMessage());assertEquals(0,events.size());
+    }
+    @Test void compatibleUpgradeKeepsTheSameExpertThreadAndPublishesTheRuntimeKey() {
+        manager.startThread(thread("3"));
+        manager.startTurn(expertTurn("7","a","codex-thread-1",null));
+        gateway.listener.onCompleted("codex-turn-1","completed",null);events.clear();
+        var next=expertTurn("8","b","codex-thread-2","a");
+        next.getExpertRuntime().setExpertVersionId(101L);next.getExpertRuntime().setCompatibleUpgrade(true);
+        manager.startTurn(next);
+        assertEquals("codex-thread-2",gateway.startedTurnThreadId);
+        assertEquals(2,gateway.threadSequence);
+        assertEquals(AgentEventType.EXPERT_RUNTIME_UPDATED,events.getFirst().getType());
+        var updated=(com.myharness.agent.entity.dto.ExpertRuntimeUpdatedEventDTO)events.getFirst().getPayload();
+        assertEquals("a".repeat(64),updated.previousExpertRuntimeKey());
+        assertEquals("b".repeat(64),updated.expertRuntimeKey());
+        assertEquals(List.of("codex-thread-1"),gateway.closedThreads);
+    }
+    @Test void compatibleFlagCannotSwitchAnExistingConversationToAnotherExpert() {
+        manager.startThread(thread("3"));manager.startTurn(expertTurn("7","a","codex-thread-1",null));
+        gateway.listener.onCompleted("codex-turn-1","completed",null);events.clear();
+        var switched=expertTurn("8","b","codex-thread-2","a");
+        switched.getExpertRuntime().setExpertId(20L);switched.getExpertRuntime().setCompatibleUpgrade(true);
+        var failure=assertThrows(AgentOperationException.class,()->manager.startTurn(switched));
+        assertEquals("CONVERSATION_BINDING_MISMATCH",failure.getErrorCode());assertEquals(2,gateway.threadSequence);
+    }
+    @Test void rejectedReplacementAfterCancellationCanReconcileToServerBinding() {
+        manager.startThread(thread("3"));manager.startTurn(expertTurn("7","a","codex-thread-1",null));
+        gateway.listener.onCompleted("codex-turn-1","completed",null);events.clear();
+        // The Server did not accept the old replacement event and still sends its original binding.
+        manager.startTurn(expertTurn("8","b","codex-thread-1",null));
+        var replaced=(com.myharness.agent.entity.dto.ThreadStartedEventDTO)events.getFirst().getPayload();
+        assertEquals("codex-thread-1",replaced.getPreviousCodexThreadId());
+        assertEquals("codex-thread-3",replaced.getCodexThreadId());
+    }
+    private StartTurnCommandDTO expertTurn(String id,String key,String thread,String previousKey) {
+        var value=turn("3",id);value.setProjectId("project-demo");value.setWorkspaceName("demo");value.setCodexThreadId(thread);
+        value.setThreadRuntimeKey(previousKey==null?null:previousKey.repeat(64));
+        var runtime=new com.myharness.agent.entity.dto.ExpertRuntimeDTO();runtime.setProjectRevision(1L);runtime.setExpertId(10L);
+        runtime.setExpertVersionId(100L);runtime.setSystemPrompt("expert "+key);runtime.setRuntimeKey(key.repeat(64));value.setExpertRuntime(runtime);return value;
+    }
 
     private FakeCodexGateway gateway;
     private AgentSessionManager manager;
@@ -64,7 +137,7 @@ class AgentSessionManagerTest {
         eventBus.subscribe(events::add);
         gateway = new FakeCodexGateway();
         registry = new WorkspaceRegistry(properties, new ObjectMapper());
-        manager = new AgentSessionManager(gateway, registry, eventBus, properties, attachmentService(), artifactService());
+        manager = new AgentSessionManager(gateway, registry, eventBus, properties, attachmentService(), artifactService(), org.mockito.Mockito.mock(ExpertSkillPreparation.class));
     }
 
     @Test
@@ -134,7 +207,7 @@ class AgentSessionManagerTest {
         manager.startThread(thread("2"));
         manager.startTurn(turn("2", "2"));
         gateway.listener.onCompleted("codex-turn-1", "completed", null);
-        manager = new AgentSessionManager(gateway, registry, eventBus, properties, attachmentService(), artifactService());
+        manager = new AgentSessionManager(gateway, registry, eventBus, properties, attachmentService(), artifactService(), org.mockito.Mockito.mock(ExpertSkillPreparation.class));
         events.clear();
 
         StartTurnCommandDTO followUp = recoverableTurn("2", "7");
@@ -209,7 +282,7 @@ class AgentSessionManagerTest {
         var files=org.mockito.Mockito.mock(com.myharness.agent.attachment.ConversationAttachmentService.class);
         org.mockito.Mockito.when(files.prepare(org.mockito.ArgumentMatchers.any(),org.mockito.ArgumentMatchers.any()))
                 .thenThrow(new AgentOperationException("ATTACHMENT_PREPARATION_FAILED","bad checksum"));
-        manager=new AgentSessionManager(gateway,registry,eventBus,properties,files,artifactService());
+        manager=new AgentSessionManager(gateway,registry,eventBus,properties,files,artifactService(), org.mockito.Mockito.mock(ExpertSkillPreparation.class));
         manager.startThread(thread("3"));
         var command=turn("3","7");command.setAttachments(List.of(new com.myharness.agent.entity.dto.TurnAttachmentDTO("9","a.txt","text/plain",5,"abc")));
         assertThrows(AgentOperationException.class,() -> manager.startTurn(command));
@@ -228,7 +301,7 @@ class AgentSessionManagerTest {
             ((com.myharness.agent.attachment.AttachmentPreparation)i.getArgument(1)).check();
             return "prepared";
         });
-        manager=new AgentSessionManager(gateway,registry,eventBus,properties,files,artifactService());manager.startThread(thread("3"));
+        manager=new AgentSessionManager(gateway,registry,eventBus,properties,files,artifactService(), org.mockito.Mockito.mock(ExpertSkillPreparation.class));manager.startThread(thread("3"));
         var executor=java.util.concurrent.Executors.newSingleThreadExecutor();
         try {
             var result=executor.submit(() -> manager.startTurn(turn("3","7")));
@@ -257,7 +330,8 @@ class AgentSessionManagerTest {
 
     @Test void capturesArtifactsBeforeReleasingTurnAndOnlyOnce() {
         var artifacts=artifactService();
-        manager=new AgentSessionManager(gateway,registry,eventBus,properties,attachmentService(),artifacts);
+        var expertPreparation=org.mockito.Mockito.mock(ExpertSkillPreparation.class);
+        manager=new AgentSessionManager(gateway,registry,eventBus,properties,attachmentService(),artifacts,expertPreparation);
         org.mockito.Mockito.when(artifacts.capture(org.mockito.ArgumentMatchers.any(),org.mockito.ArgumentMatchers.eq("7")))
                 .thenAnswer(i -> {assertEquals(1,manager.activeTurnCount());return 1;});
         manager.startThread(thread("3"));manager.startTurn(turn("3","7"));
@@ -265,11 +339,21 @@ class AgentSessionManagerTest {
         gateway.listener.onCompleted("codex-turn-1","completed",null);
         assertEquals(0,manager.activeTurnCount());
         org.mockito.Mockito.verify(artifacts).capture(org.mockito.ArgumentMatchers.any(),org.mockito.ArgumentMatchers.eq("7"));
+        
         assertEquals(AgentEventType.TURN_COMPLETED,events.getLast().getType());
+    }
+    @Test void failedSkillPreparationReleasesTurn() {
+        var expertPreparation=org.mockito.Mockito.mock(ExpertSkillPreparation.class);
+        org.mockito.Mockito.when(expertPreparation.prepare(org.mockito.ArgumentMatchers.any(),org.mockito.ArgumentMatchers.any()))
+                .thenThrow(new CodexException("Skill preparation failed"));
+        manager=new AgentSessionManager(gateway,registry,eventBus,properties,attachmentService(),artifactService(),expertPreparation);
+        manager.startThread(thread("3"));
+        assertThrows(CodexException.class,()->manager.startTurn(turn("3","7")));
+        assertEquals(0,manager.activeTurnCount());
     }
     @Test void captureFailureWarnsWithoutFailingCompletedTurn() {
         var artifacts=artifactService();
-        manager=new AgentSessionManager(gateway,registry,eventBus,properties,attachmentService(),artifacts);
+        manager=new AgentSessionManager(gateway,registry,eventBus,properties,attachmentService(),artifacts, org.mockito.Mockito.mock(ExpertSkillPreparation.class));
         org.mockito.Mockito.when(artifacts.capture(org.mockito.ArgumentMatchers.any(),org.mockito.ArgumentMatchers.any()))
                 .thenThrow(new AgentOperationException("ARTIFACT_CAPTURE_FAILED","invalid manifest"));
         manager.startThread(thread("3"));manager.startTurn(turn("3","7"));
@@ -280,6 +364,8 @@ class AgentSessionManagerTest {
     }
 
     private static final class FakeCodexGateway implements CodexGateway {
+        private final List<String> closedThreads=new ArrayList<>();
+        @Override public void closeThread(String id) {closedThreads.add(id);}
         private int threadSequence;
         private CodexEventListener listener;
         private String interruptedThreadId;
@@ -306,6 +392,7 @@ class AgentSessionManagerTest {
 
         @Override
         public String startTurn(String threadId, CodexTurnInput input, CodexEventListener listener) {
+            lastInput=input;
             startedTurnThreadId = threadId;
             this.listener = listener;
             return "codex-turn-1";
@@ -324,5 +411,6 @@ class AgentSessionManagerTest {
         @Override
         public void close() {
         }
+        private CodexTurnInput lastInput;
     }
 }
