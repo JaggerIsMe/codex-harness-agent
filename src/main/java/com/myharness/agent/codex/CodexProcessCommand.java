@@ -15,19 +15,28 @@ final class CodexProcessCommand {
     }
 
     static List<String> appServer(String configuredCommand) {
-        return appServer(configuredCommand,false,"elevated",System.getProperty("os.name"),System.getenv("PATH"),System.getenv("ComSpec"));
+        return appServer(configuredCommand,false,"elevated",System.getProperty("os.name"),System.getenv("PATH"),System.getenv("ComSpec"),null);
     }
 
     static List<String> appServer(String configuredCommand, String osName, String pathValue, String commandShell) {
-        return appServer(configuredCommand,false,"elevated",osName,pathValue,commandShell);
+        return appServer(configuredCommand,false,"elevated",osName,pathValue,commandShell,null);
     }
 
     static List<String> appServer(String configuredCommand,boolean strictIsolation,String windowsSandbox) {
-        return appServer(configuredCommand,strictIsolation,windowsSandbox,System.getProperty("os.name"),System.getenv("PATH"),System.getenv("ComSpec"));
+        return appServer(configuredCommand,strictIsolation,windowsSandbox,System.getProperty("os.name"),System.getenv("PATH"),System.getenv("ComSpec"),null);
+    }
+
+    static List<String> appServer(String configuredCommand,boolean strictIsolation,String windowsSandbox,Path modelCatalog) {
+        return appServer(configuredCommand,strictIsolation,windowsSandbox,System.getProperty("os.name"),System.getenv("PATH"),System.getenv("ComSpec"),modelCatalog);
     }
 
     static List<String> appServer(String configuredCommand,boolean strictIsolation,String windowsSandbox,
                                   String osName,String pathValue,String commandShell) {
+        return appServer(configuredCommand,strictIsolation,windowsSandbox,osName,pathValue,commandShell,null);
+    }
+
+    static List<String> appServer(String configuredCommand,boolean strictIsolation,String windowsSandbox,
+                                  String osName,String pathValue,String commandShell,Path modelCatalog) {
         String configured = configuredCommand == null ? "" : configuredCommand.trim();
         if (configured.isEmpty()) {
             throw new CodexException("Codex command must be configured");
@@ -49,6 +58,10 @@ final class CodexProcessCommand {
             arguments.add("--strict-config");
             arguments.add("-c");
             arguments.add("windows.sandbox=\"elevated\"");
+        }
+        if(modelCatalog!=null) {
+            arguments.add("-c");
+            arguments.add("model_catalog_json=\""+modelCatalog.toAbsolutePath().normalize().toString().replace('\\','/')+"\"");
         }
         arguments.add("--stdio");
 

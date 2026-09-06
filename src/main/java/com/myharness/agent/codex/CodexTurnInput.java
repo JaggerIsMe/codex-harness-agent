@@ -11,16 +11,11 @@ public class CodexTurnInput {
     public String getExpertInstructions() {return expertInstructions;}
     public java.util.List<CodexSkillInput> getSkills() {return skills;}
     private final String message;
-    private final String model;
-    private final String reasoningEffort;
-
-    public CodexTurnInput(String message, String model, String reasoningEffort) {
-        this.message = message;
-        this.model = model;
-        this.reasoningEffort = reasoningEffort;
-    }
+    private java.util.List<String> localImages=java.util.List.of();
+    public CodexTurnInput(String message){this.message=message;}
+    public CodexTurnInput(String message,String ignoredModel,String ignoredReasoningEffort){this(message);}
 
     public String getMessage() { return message; }
-    public String getModel() { return model; }
-    public String getReasoningEffort() { return reasoningEffort; }
+    public CodexTurnInput withLocalImages(java.util.List<String> value){localImages=java.util.List.copyOf(value);return this;}
+    public java.util.List<String> getLocalImages(){return localImages;}
 }

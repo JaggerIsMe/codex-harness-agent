@@ -1,6 +1,12 @@
 package com.myharness.agent.entity.dto;
 
 public class StartTurnCommandDTO {
+    private String threadModelRuntimeKey;
+    public String getThreadModelRuntimeKey(){return threadModelRuntimeKey;}
+    public void setThreadModelRuntimeKey(String value){threadModelRuntimeKey=value;}
+    private ModelRuntimeDTO modelRuntime;
+    public ModelRuntimeDTO getModelRuntime(){return modelRuntime;}
+    public void setModelRuntime(ModelRuntimeDTO value){modelRuntime=value;}
     private String threadRuntimeKey;
     public String getThreadRuntimeKey() { return threadRuntimeKey; }
     public void setThreadRuntimeKey(String value) { threadRuntimeKey=value; }
@@ -20,8 +26,6 @@ public class StartTurnCommandDTO {
     private String conversationId;
     private String turnId;
     private String message;
-    private String model;
-    private String reasoningEffort;
 
     public String getProjectId() { return projectId; }
     public void setProjectId(String projectId) { this.projectId = projectId; }
@@ -36,8 +40,4 @@ public class StartTurnCommandDTO {
     public void setTurnId(String turnId) { this.turnId = turnId; }
     public String getMessage() { return message; }
     public void setMessage(String message) { this.message = message; }
-    public String getModel() { return model; }
-    public void setModel(String model) { this.model = model; }
-    public String getReasoningEffort() { return reasoningEffort; }
-    public void setReasoningEffort(String reasoningEffort) { this.reasoningEffort = reasoningEffort; }
 }

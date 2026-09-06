@@ -55,6 +55,7 @@ public class AppServerCodexAdapter implements CodexGateway {
     private volatile BufferedWriter writer;
     private volatile boolean closing;
     private volatile boolean runtimeFailed;
+    private volatile com.myharness.agent.entity.dto.ModelRuntimeDTO startupModelRuntime;
     @Override public boolean isAvailable() {return !runtimeFailed && process!=null && process.isAlive();}
 
     public AppServerCodexAdapter(AgentProperties properties, ObjectMapper objectMapper) {
@@ -70,10 +71,12 @@ public class AppServerCodexAdapter implements CodexGateway {
         if (properties.isStrictProjectIsolation() && !hasText(options.getProjectId())) {
             throw new CodexException("Project ID is required in strict project isolation mode");
         }
+        activateModelRuntime(options.getModelRuntime());
         ObjectNode params = objectMapper.createObjectNode();
         params.put("cwd", options.getWorkspace().toString());
         params.put("approvalPolicy", INTERACTIVE_APPROVAL_POLICY);
         configureProjectPermissions(params, options.getWorkspace());
+        configureModelProvider(params,options);
         configureMcpServers(params,options);
         disableInheritedMcpServers(params,options);
         params.put("ephemeral", false);
@@ -99,6 +102,7 @@ public class AppServerCodexAdapter implements CodexGateway {
         if (properties.isStrictProjectIsolation() && !hasText(options.getProjectId())) {
             throw new CodexException("Project ID is required in strict project isolation mode");
         }
+        activateModelRuntime(options.getModelRuntime());
         if(options.isIsolatedExpertRuntime()) configureSkillRoots(options.getWorkspace(),options.getExpertSkills());
         // Verify the persisted root before applying overrides: resume must not move another project's history.
         ObjectNode read = objectMapper.createObjectNode().put("threadId", threadId).put("includeTurns", false);
@@ -119,6 +123,7 @@ public class AppServerCodexAdapter implements CodexGateway {
         params.put("cwd", options.getWorkspace().toString());
         params.put("approvalPolicy", INTERACTIVE_APPROVAL_POLICY);
         configureProjectPermissions(params, options.getWorkspace());
+        configureModelProvider(params,options);
         configureMcpServers(params,options);
         disableInheritedMcpServers(params,options);
         if (hasText(options.getModel())) params.put("model", options.getModel().trim());
@@ -158,15 +163,13 @@ public class AppServerCodexAdapter implements CodexGateway {
     static void configureExpert(ObjectNode params, CodexTurnInput input, String defaultModel,
                                 List<CodexSkillInput> verifiedSkills) {
         if(!input.isManagedExpert()) return;
-        String model=input.getModel()==null || input.getModel().isBlank() ? defaultModel : input.getModel().trim();
+        String model=defaultModel;
         if(model==null || model.isBlank()) throw new CodexException("Codex 未返回运行模型，无法应用专家配置，请升级 Codex");
         ObjectNode settings=params.putObject("collaborationMode").put("mode","default").putObject("settings");
         settings.put("model",model);
         String instructions=expertInstructions(input.getExpertInstructions(),verifiedSkills);
         if(instructions==null) settings.putNull("developer_instructions");
         else settings.put("developer_instructions",instructions);
-        if(input.getReasoningEffort()==null || input.getReasoningEffort().isBlank()) settings.putNull("reasoning_effort");
-        else settings.put("reasoning_effort",input.getReasoningEffort());
     }
 
     private static String expertInstructions(String expertInstructions,List<CodexSkillInput> verifiedSkills) {
@@ -236,6 +239,28 @@ public class AppServerCodexAdapter implements CodexGateway {
         project.put(".git","read");
         project.put(".codex","read");
         policy.putObject("network").put("enabled",false);
+    }
+
+    private void activateModelRuntime(com.myharness.agent.entity.dto.ModelRuntimeDTO runtime) {
+        if(runtime==null || !hasText(runtime.getModelId())) return;
+        synchronized(lifecycleLock) {
+            if(process!=null && process.isAlive() && startupModelRuntime!=null
+                    && !java.util.Objects.equals(startupModelRuntime.getRuntimeKey(),runtime.getRuntimeKey()))
+                throw new CodexException("运行中的 App Server 不能切换模型 Provider");
+            startupModelRuntime=runtime;
+        }
+    }
+
+    void configureModelProvider(ObjectNode params,CodexThreadOptions options) {
+        var runtime=options.getModelRuntime();
+        if(runtime==null || !hasText(runtime.getBaseUrl())) return;
+        if(!hasText(runtime.getApiKey()) || !hasText(runtime.getRuntimeKey())) throw new CodexException("托管模型凭据或运行标识缺失");
+        JsonNode raw=params.get("config");ObjectNode config=raw instanceof ObjectNode value?value:params.putObject("config");
+        config.put("model_provider","harness_managed");
+        ObjectNode provider=config.withObject("model_providers").putObject("harness_managed");
+        provider.put("name",hasText(runtime.getProviderName())?runtime.getProviderName():"Harness Managed");
+        provider.put("base_url",runtime.getBaseUrl());provider.put("env_key","HARNESS_MODEL_API_KEY");
+        provider.put("wire_api","responses");provider.put("requires_openai_auth",false);
     }
 
     void configureMcpServers(ObjectNode params,CodexThreadOptions options) {
@@ -347,20 +372,15 @@ public class AppServerCodexAdapter implements CodexGateway {
         ObjectNode text = inputs.addObject();
         text.put("type", "text");
         text.put("text", input.getMessage());
-        if (hasText(input.getModel())) {
-            params.put("model", input.getModel().trim());
+        for(String imagePath:input.getLocalImages()) {
+            ObjectNode image=inputs.addObject();image.put("type","localImage");image.put("path",imagePath);
         }
-        if (hasText(input.getReasoningEffort())) {
-            params.put("effort", input.getReasoningEffort().trim());
-        }
-
         configureExpert(params,input,threadModels.get(threadId),expertSkills);
         listenersByThread.put(threadId, listener);
         try {
             JsonNode result = request("turn/start", params);
             String turnId = requiredText(result.path("turn"), "id", "turn/start response");
             listenersByTurn.put(turnId, listener);
-            if(hasText(input.getModel())) threadModels.put(threadId,input.getModel().trim());
             return turnId;
         } catch (RuntimeException exception) {
             listenersByThread.remove(threadId, listener);
@@ -437,10 +457,17 @@ public class AppServerCodexAdapter implements CodexGateway {
             }
             closing = false;
             try {
+                Path modelCatalog=null;
+                if(startupModelRuntime!=null&&hasText(startupModelRuntime.getBaseUrl()))
+                    modelCatalog=new ManagedModelCatalog(objectMapper).write(
+                            properties.getDataDir().resolve("model-catalogs"),startupModelRuntime);
                 List<String> command = CodexProcessCommand.appServer(properties.getCodexCommand(),
-                        properties.isStrictProjectIsolation(),properties.getWindowsSandbox());
+                        properties.isStrictProjectIsolation(),properties.getWindowsSandbox(),modelCatalog);
                 LOGGER.info("Starting Codex App Server with command {} in {}", command, System.getProperty("user.dir"));
-                Process started = new ProcessBuilder(command).start();
+                ProcessBuilder builder=new ProcessBuilder(command);
+                if(startupModelRuntime!=null && hasText(startupModelRuntime.getApiKey()))
+                    builder.environment().put("HARNESS_MODEL_API_KEY",startupModelRuntime.getApiKey());
+                Process started = builder.start();
                 process = started;
                 runtimeFailed=false;
                 writer = new BufferedWriter(new OutputStreamWriter(started.getOutputStream(), StandardCharsets.UTF_8));

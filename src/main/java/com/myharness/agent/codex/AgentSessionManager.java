@@ -65,6 +65,7 @@ public class AgentSessionManager {
         require(command == null ? null : command.getProjectId(), "projectId");
         require(command == null ? null : command.getConversationId(), "conversationId");
         require(command.getWorkspaceName(), "workspaceName");
+        validateModelRuntime(command.getModelRuntime());
         if (sessions.containsKey(command.getConversationId())) {
             throw new AgentOperationException("CONVERSATION_ALREADY_STARTED",
                     "Conversation already has a Codex thread: " + command.getConversationId());
@@ -78,12 +79,13 @@ public class AgentSessionManager {
         reserveProjectRoot(command.getProjectId(),workspace);
         final String codexThreadId;
         try {
-            codexThreadId = codexGateway.startThread(new CodexThreadOptions(command.getProjectId(),workspace,command.getModel()));
+            codexThreadId = codexGateway.startThread(new CodexThreadOptions(command.getProjectId(),workspace,command.getModelRuntime()));
         } catch (RuntimeException exception) {
             releaseUnusedProjectRoot(command.getProjectId(),workspace);
             throw exception;
         }
         SessionContext context = new SessionContext(command.getProjectId(),command.getConversationId(), codexThreadId, workspace);
+        context.modelRuntimeKey=command.getModelRuntime()==null?null:command.getModelRuntime().getRuntimeKey();
         SessionContext existing = sessions.putIfAbsent(command.getConversationId(), context);
         if (existing != null) {
             codexGateway.closeThread(codexThreadId);
@@ -99,6 +101,7 @@ public class AgentSessionManager {
         if(!acceptingTurns) throw new AgentOperationException("AGENT_DISCONNECTED","Agent 已断开连接");
         require(command == null ? null : command.getConversationId(), "conversationId");
         require(command.getTurnId(), "turnId");
+        validateModelRuntime(command.getModelRuntime());
         if(command.getAttachments().isEmpty()) require(command.getMessage(), "message");
         if(canceledTurns.contains(command.getTurnId())) return new AgentEvent(AgentEventType.TURN_INTERRUPTED,command.getTurnId(),
                 new TurnTerminalEventDTO(command.getConversationId(),command.getTurnId(),null,"已取消",0L));
@@ -127,8 +130,12 @@ public class AgentSessionManager {
         try {
             CodexEventListener listener = listener(session, active);
             if(canceledTurns.contains(command.getTurnId()) || !acceptingTurns || connectionEpoch.get()!=epoch) active.preparation.cancel();
-            String message=attachments.prepare(command,active.preparation);
-            message=message+artifacts.instructions(command.getTurnId());
+            var preparedAttachments=attachments.prepareInput(command,active.preparation);
+            if(preparedAttachments==null) preparedAttachments=new com.myharness.agent.attachment.PreparedTurnAttachments(
+                    attachments.prepare(command,active.preparation),java.util.List.of());
+            String message=preparedAttachments.message()+artifacts.instructions(command.getTurnId());
+            if(!preparedAttachments.localImages().isEmpty()&&command.getModelRuntime()!=null&&!command.getModelRuntime().supports("IMAGE"))
+                throw new AgentOperationException("MODEL_MODALITY_UNSUPPORTED","当前 Device 模型不支持图片输入");
             var preparedSkills=expertSkills.prepare(command,active.preparation);
             active.preparation.check();
             if(command.getExpertRuntime()!=null) {
@@ -141,7 +148,7 @@ public class AgentSessionManager {
             synchronized(active) {active.preparation.check(); active.launching=true;}
             if(!command.getAttachments().isEmpty()) listener.onEvent(new CodexEvent(com.myharness.agent.entity.enums.TurnEventType.ITEM_COMPLETED,
                     "attachment-preparation","附件已保存到项目，正在启动 Codex",null,null));
-            CodexTurnInput input=new CodexTurnInput(message, command.getModel(), command.getReasoningEffort());
+            CodexTurnInput input=new CodexTurnInput(message).withLocalImages(preparedAttachments.localImages());
             if(command.getExpertRuntime()!=null) input.withExpert(command.getExpertRuntime().getSystemPrompt(),preparedSkills);
             String codexTurnId = codexGateway.startTurn(session.codexThreadId,input,listener);
             session.needsHistory=false;
@@ -366,9 +373,10 @@ public class AgentSessionManager {
                 if(command.getExpertRuntime()!=null) {
                     SessionContext restored=new SessionContext(command.getProjectId(),command.getConversationId(),restoredThreadId,workspace);
                     restored.runtimeKey=command.getThreadRuntimeKey();restored.needsHistory=command.isRecreateUnstartedThread();
+                    restored.modelRuntimeKey=command.getThreadModelRuntimeKey();
                     sessions.put(command.getConversationId(),restored);return restored;
                 }
-                var options = new CodexThreadOptions(command.getProjectId(), workspace, command.getModel());
+                var options = new CodexThreadOptions(command.getProjectId(), workspace, command.getModelRuntime());
                 try { codexGateway.resumeThread(restoredThreadId, options); }
                 catch (CodexThreadNotLoadedException missing) {
                     if (!command.isRecreateUnstartedThread()) throw missing;
@@ -379,6 +387,7 @@ public class AgentSessionManager {
                 }
                 SessionContext restored = new SessionContext(command.getProjectId(), command.getConversationId(),
                         restoredThreadId, workspace);
+                restored.modelRuntimeKey=command.getModelRuntime()==null?null:command.getModelRuntime().getRuntimeKey();
                 sessions.put(command.getConversationId(), restored);
                 return restored;
             } catch (RuntimeException exception) {
@@ -386,6 +395,14 @@ public class AgentSessionManager {
                 throw exception;
             }
         }
+    }
+
+    private void validateModelRuntime(com.myharness.agent.entity.dto.ModelRuntimeDTO runtime) {
+        if(runtime==null) return; // Rolling-upgrade compatibility with Servers that predate managed providers.
+        if(runtime.getSchemaVersion()!=1 || runtime.getModelId()==null || runtime.getModelId().isBlank()
+                || runtime.getBaseUrl()==null || runtime.getBaseUrl().isBlank() || runtime.getApiKey()==null || runtime.getApiKey().isBlank()
+                || runtime.getRuntimeKey()==null || !runtime.getRuntimeKey().matches("[0-9a-f]{64}"))
+            throw new AgentOperationException("MODEL_CONFIG_INVALID","需要有效的 Device 托管模型运行配置");
     }
 
     private void require(String value, String field) {
@@ -401,11 +418,13 @@ public class AgentSessionManager {
             throw new AgentOperationException("EXPERT_CONFIG_INVALID","需要受支持的会话专家运行标识");
         if(runtime.getSchemaVersion()>=3 && session.expertId!=null && !session.expertId.equals(runtime.getExpertId()))
             throw new AgentOperationException("CONVERSATION_BINDING_MISMATCH","Conversation 不能切换到另一个 Expert");
-        var options=new CodexThreadOptions(session.projectId,session.workspace,command.getModel())
+        var options=new CodexThreadOptions(session.projectId,session.workspace,command.getModelRuntime())
                 .withExpertRuntime(skills,runtime.getMcpServers()==null ? java.util.List.of() : runtime.getMcpServers());
+        boolean modelChanged=session.modelRuntimeKey!=null && command.getModelRuntime()!=null
+                && !java.util.Objects.equals(session.modelRuntimeKey,command.getModelRuntime().getRuntimeKey());
         if(java.util.Objects.equals(session.runtimeKey,runtime.getRuntimeKey())) {
-            try {codexGateway.resumeThread(session.codexThreadId,options);session.expertId=runtime.getExpertId();return session.needsHistory;}
-            catch(CodexThreadNotLoadedException missing) {if(!command.isRecreateUnstartedThread()) throw missing;}
+            try {codexGateway.resumeThread(session.codexThreadId,options);session.expertId=runtime.getExpertId();session.modelRuntimeKey=command.getModelRuntime()==null?null:command.getModelRuntime().getRuntimeKey();return session.needsHistory;}
+            catch(CodexThreadNotLoadedException missing) {if(modelChanged||!command.isRecreateUnstartedThread()) throw missing;}
         }
         if(session.runtimeKey!=null && runtime.getSchemaVersion()>=3
                 && runtime.isCompatibleUpgrade() && runtime.getExpertId()!=null) {
@@ -417,9 +436,10 @@ public class AgentSessionManager {
                         new ExpertRuntimeUpdatedEventDTO(command.getConversationId(),command.getTurnId(),session.codexThreadId,
                                 previousKey,runtime.getRuntimeKey())));
                 session.runtimeKey=runtime.getRuntimeKey();session.expertId=runtime.getExpertId();session.needsHistory=false;
+                session.modelRuntimeKey=command.getModelRuntime()==null?null:command.getModelRuntime().getRuntimeKey();
                 return false;
             } catch(CodexThreadNotLoadedException missing) {
-                if(!command.isRecreateUnstartedThread()) throw missing;
+                if(modelChanged||!command.isRecreateUnstartedThread()) throw missing;
             }
         }
         cancellation.check();String previous=session.codexThreadId;
@@ -431,6 +451,7 @@ public class AgentSessionManager {
                             .withExpertRuntimeKey(runtime.getRuntimeKey())));
         } catch(RuntimeException failure) {codexGateway.closeThread(next);throw failure;}
         session.previousCodexThreadId=previous;session.codexThreadId=next;session.runtimeKey=runtime.getRuntimeKey();session.expertId=runtime.getExpertId();
+        session.modelRuntimeKey=command.getModelRuntime()==null?null:command.getModelRuntime().getRuntimeKey();
         session.needsHistory=true;
         codexGateway.closeThread(previous);
         return true;
@@ -465,6 +486,7 @@ public class AgentSessionManager {
         private volatile String codexThreadId;
         private volatile String previousCodexThreadId;
         private volatile String runtimeKey;
+        private volatile String modelRuntimeKey;
         private volatile Long expertId;
         private volatile boolean needsHistory;
         private final Path workspace;

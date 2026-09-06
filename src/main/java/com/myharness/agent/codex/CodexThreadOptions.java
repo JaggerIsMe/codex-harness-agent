@@ -21,15 +21,18 @@ public class CodexThreadOptions {
     }
     private final String projectId;
     private final Path workspace;
-    private final String model;
+    private final com.myharness.agent.entity.dto.ModelRuntimeDTO modelRuntime;
 
-    public CodexThreadOptions(String projectId, Path workspace, String model) {
+    public CodexThreadOptions(String projectId, Path workspace, Object modelOrRuntime) {
         this.projectId = projectId;
         this.workspace = workspace;
-        this.model = model;
+        if(modelOrRuntime instanceof com.myharness.agent.entity.dto.ModelRuntimeDTO runtime) this.modelRuntime=runtime;
+        else {com.myharness.agent.entity.dto.ModelRuntimeDTO runtime=new com.myharness.agent.entity.dto.ModelRuntimeDTO();runtime.setModelId((String)modelOrRuntime);this.modelRuntime=runtime;}
     }
 
     public String getProjectId() { return projectId; }
     public Path getWorkspace() { return workspace; }
-    public String getModel() { return model; }
+    public String getModel() { return modelRuntime==null?null:modelRuntime.getModelId(); }
+    public com.myharness.agent.entity.dto.ModelRuntimeDTO getModelRuntime(){return modelRuntime;}
+    public String getModelRuntimeKey(){return modelRuntime==null?null:modelRuntime.getRuntimeKey();}
 }
