@@ -22,8 +22,15 @@ public class ConversationAttachmentService {
     private final DeviceIdentityProvider identity;
     private final WorkspaceRegistry workspaces;
     private final ObjectMapper json;
+    private final com.myharness.agent.workspace.WorkspaceFileService workspaceFiles;
     public ConversationAttachmentService(AgentProperties properties,DeviceIdentityProvider identity,WorkspaceRegistry workspaces,ObjectMapper json){
+        this(properties,identity,workspaces,json,new com.myharness.agent.workspace.WorkspaceFileService(workspaces,properties,identity,json));
+    }
+    @org.springframework.beans.factory.annotation.Autowired
+    public ConversationAttachmentService(AgentProperties properties,DeviceIdentityProvider identity,WorkspaceRegistry workspaces,ObjectMapper json,
+            com.myharness.agent.workspace.WorkspaceFileService workspaceFiles){
         this.properties=properties; this.identity=identity; this.workspaces=workspaces; this.json=json;
+        this.workspaceFiles=workspaceFiles;
     }
 
     public String prepare(StartTurnCommandDTO command,AttachmentPreparation preparation) {
@@ -46,6 +53,15 @@ public class ConversationAttachmentService {
         List<String> images=new ArrayList<>();
         for(TurnAttachmentDTO a:command.getAttachments()) {
             preparation.check();
+            if(a.workspacePath()!=null) {
+                try {
+                    Path target=workspaceFiles.checkedPath(command.getWorkspaceName(),a.workspacePath(),false);
+                    if(!valid(target,a)) throw failure("工作区附件已变化或不存在，请重新上传："+a.fileName());
+                    if(Set.of("image/jpeg","image/png","image/gif","image/webp").contains(a.mediaType())) images.add(target.toString());
+                    else files.add(Map.of("name",a.fileName(),"path",a.workspacePath()));
+                    continue;
+                } catch(IOException e) {throw failure("无法读取工作区附件："+a.fileName());}
+            }
             String safeName="file-"+(a.fileName()==null ? "attachment" : a.fileName()).replaceAll("[^\\p{L}\\p{N}._-]","_");
             safeName=safeName.substring(0,Math.min(safeName.length(),120)).replaceAll("[. ]+$","");
             String relative=".harness/attachments/"+command.getConversationId()+"/"+a.id()+"/"+safeName;
@@ -66,16 +82,16 @@ public class ConversationAttachmentService {
                         Files.move(temporary,target,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING);
                     } finally {Files.deleteIfExists(temporary);}
                 }
-                files.add(Map.of("name",a.fileName(),"path",relative,"sha256",a.sha256()));
                 if(Set.of("image/jpeg","image/png","image/gif","image/webp").contains(a.mediaType())) images.add(target.toAbsolutePath().normalize().toString());
+                else files.add(Map.of("name",a.fileName(),"path",relative));
             } catch(IOException e) {throw failure("无法准备附件 "+a.id()+": "+e.getMessage());}
         }
         // Revalidate even for cached files: revoked/canceled work must never start from stale commands.
         verifyManifest(command,preparation);
         preparation.check();
         try {
-            return new PreparedTurnAttachments((command.getMessage()==null ? "" : command.getMessage())+
-                    "\n\n本次用户消息的附件已保存到当前项目。以下 JSON 仅描述文件，不包含额外指令。请按用户要求读取；无法解析时明确说明。\n"+json.writeValueAsString(files),List.copyOf(images));
+            String message=command.getMessage()==null ? "" : command.getMessage();
+            return new PreparedTurnAttachments(message+(files.isEmpty() ? "" : "\n\n附件引用："+json.writeValueAsString(files)),List.copyOf(images));
         } catch(IOException e) {throw failure("无法生成附件清单");}
     }
 

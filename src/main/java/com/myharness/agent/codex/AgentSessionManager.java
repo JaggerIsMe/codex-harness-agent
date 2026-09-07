@@ -133,7 +133,7 @@ public class AgentSessionManager {
             var preparedAttachments=attachments.prepareInput(command,active.preparation);
             if(preparedAttachments==null) preparedAttachments=new com.myharness.agent.attachment.PreparedTurnAttachments(
                     attachments.prepare(command,active.preparation),java.util.List.of());
-            String message=preparedAttachments.message()+artifacts.instructions(command.getTurnId());
+            String message=preparedAttachments.message();
             if(!preparedAttachments.localImages().isEmpty()&&command.getModelRuntime()!=null&&!command.getModelRuntime().supports("IMAGE"))
                 throw new AgentOperationException("MODEL_MODALITY_UNSUPPORTED","当前 Device 模型不支持图片输入");
             var preparedSkills=expertSkills.prepare(command,active.preparation);
@@ -279,16 +279,6 @@ public class AgentSessionManager {
             public void onCompleted(String codexTurnId, String status, String reason) {
                 synchronized (active) {
                     if(active.finished.get()) return;
-                    if("completed".equals(status) && !active.preparation.canceled()) {
-                        try {
-                            int count=artifacts.capture(session.workspace,active.harnessTurnId);
-                            if(count>0) onEvent(new CodexEvent(com.myharness.agent.entity.enums.TurnEventType.ITEM_COMPLETED,
-                                    "artifact-publication","已准备 "+count+" 个交付文件，正在上传；完成后可在回答下下载",null,null));
-                        } catch(RuntimeException e) {
-                            onEvent(new CodexEvent(com.myharness.agent.entity.enums.TurnEventType.WARNING,
-                                    "artifact-publication-error",e.getMessage(),null,null));
-                        }
-                    }
                     if (!finish(session, active)) {
                         return;
                     }

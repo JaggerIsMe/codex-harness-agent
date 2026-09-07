@@ -351,17 +351,16 @@ class AgentSessionManagerTest {
         return command;
     }
 
-    @Test void capturesArtifactsBeforeReleasingTurnAndOnlyOnce() {
+    @Test void completesTurnWithoutLegacyArtifactCapture() {
         var artifacts=artifactService();
         var expertPreparation=org.mockito.Mockito.mock(ExpertSkillPreparation.class);
         manager=new AgentSessionManager(gateway,registry,eventBus,properties,attachmentService(),artifacts,expertPreparation);
-        org.mockito.Mockito.when(artifacts.capture(org.mockito.ArgumentMatchers.any(),org.mockito.ArgumentMatchers.eq("7")))
-                .thenAnswer(i -> {assertEquals(1,manager.activeTurnCount());return 1;});
         manager.startThread(thread("3"));manager.startTurn(turn("3","7"));
         gateway.listener.onCompleted("codex-turn-1","completed",null);
         gateway.listener.onCompleted("codex-turn-1","completed",null);
         assertEquals(0,manager.activeTurnCount());
-        org.mockito.Mockito.verify(artifacts).capture(org.mockito.ArgumentMatchers.any(),org.mockito.ArgumentMatchers.eq("7"));
+        org.mockito.Mockito.verifyNoInteractions(artifacts);
+        assertEquals("do work",gateway.lastInput.getMessage());
         
         assertEquals(AgentEventType.TURN_COMPLETED,events.getLast().getType());
     }
@@ -374,18 +373,6 @@ class AgentSessionManagerTest {
         assertThrows(CodexException.class,()->manager.startTurn(turn("3","7")));
         assertEquals(0,manager.activeTurnCount());
     }
-    @Test void captureFailureWarnsWithoutFailingCompletedTurn() {
-        var artifacts=artifactService();
-        manager=new AgentSessionManager(gateway,registry,eventBus,properties,attachmentService(),artifacts, org.mockito.Mockito.mock(ExpertSkillPreparation.class));
-        org.mockito.Mockito.when(artifacts.capture(org.mockito.ArgumentMatchers.any(),org.mockito.ArgumentMatchers.any()))
-                .thenThrow(new AgentOperationException("ARTIFACT_CAPTURE_FAILED","invalid manifest"));
-        manager.startThread(thread("3"));manager.startTurn(turn("3","7"));
-        gateway.listener.onCompleted("codex-turn-1","completed",null);
-        assertEquals(0,manager.activeTurnCount());
-        assertEquals(com.myharness.agent.entity.enums.TurnEventType.WARNING,((TurnEventDTO)events.getFirst().getPayload()).getEventType());
-        assertEquals(AgentEventType.TURN_COMPLETED,events.getLast().getType());
-    }
-
     private static final class FakeCodexGateway implements CodexGateway {
         private final List<String> closedThreads=new ArrayList<>();
         @Override public void closeThread(String id) {closedThreads.add(id);}

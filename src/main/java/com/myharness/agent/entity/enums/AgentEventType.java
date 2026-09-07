@@ -1,6 +1,7 @@
 package com.myharness.agent.entity.enums;
 
 public enum AgentEventType {
+    WORKSPACE_FILE_RESULT,
     REGISTER,
     HEARTBEAT,
     WORKSPACES_CHANGED,

@@ -68,4 +68,26 @@ class ConversationAttachmentServiceTest {
     @Test void durableClaimRefusesSecondExecution() {
         service.claim(command);assertThrows(AgentOperationException.class,() -> service.claim(command));
     }
+    @Test void workspaceImageUsesNativeInputWithUnchangedTextAndNoDownload() throws Exception {
+        Files.write(workspace.resolve("photo.png"),bytes);
+        var old=command.getAttachments().getFirst();
+        command.setAttachments(List.of(new TurnAttachmentDTO(old.id(),"photo.png","image/png",old.sizeBytes(),old.sha256(),"photo.png")));
+        command.setMessage("分析这张图片");
+        var prepared=service.prepareInput(command,new AttachmentPreparation());
+        assertEquals("分析这张图片",prepared.message());
+        assertEquals(List.of(workspace.resolve("photo.png").toString()),prepared.localImages());
+        assertEquals(0,downloads.get());assertFalse(Files.exists(workspace.resolve(".harness")));
+    }
+    @Test void ordinaryWorkspaceFilesKeepAssociationOrderAndRejectChangedContents() throws Exception {
+        Files.write(workspace.resolve("data.txt"),bytes);
+        var old=command.getAttachments().getFirst();
+        command.setAttachments(List.of(new TurnAttachmentDTO(old.id(),"data.txt",old.mediaType(),old.sizeBytes(),old.sha256(),"data.txt")));
+        command.setMessage("分析这个文件");
+        var prepared=service.prepareInput(command,new AttachmentPreparation());
+        assertTrue(prepared.message().startsWith("分析这个文件\n\n附件引用："));
+        assertTrue(prepared.message().contains("data.txt"));assertFalse(prepared.message().contains("manifest"));
+        assertEquals("分析这个文件",command.getMessage());assertEquals(0,downloads.get());
+        Files.writeString(workspace.resolve("data.txt"),"changed");
+        assertThrows(AgentOperationException.class,() -> service.prepareInput(command,new AttachmentPreparation()));
+    }
 }

@@ -1,6 +1,10 @@
 package com.myharness.agent.entity.enums;
 
 public enum AgentCommandType {
+    SYNC_WORKSPACE_TREE,
+    CREATE_WORKSPACE_DIRECTORY,
+    UPLOAD_WORKSPACE_FILE,
+    PREPARE_WORKSPACE_DOWNLOAD,
     START_THREAD,
     START_TURN,
     INTERRUPT_TURN,

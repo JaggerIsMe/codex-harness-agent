@@ -28,11 +28,17 @@ import java.util.List;
 
 @Component
 public class AgentCommandDispatcher {
+    private com.myharness.agent.workspace.WorkspaceFileService workspaceFiles;
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setWorkspaceFiles(com.myharness.agent.workspace.WorkspaceFileService value) { workspaceFiles=value; }
+    private final java.util.concurrent.ExecutorService fileExecutor=new java.util.concurrent.ThreadPoolExecutor(
+            2,2,0,java.util.concurrent.TimeUnit.SECONDS,new java.util.concurrent.ArrayBlockingQueue<>(100),
+            Thread.ofPlatform().daemon().name("harness-files-",0).factory());
     private final ProtocolCodec codec;
     private final java.util.concurrent.ExecutorService turnExecutor=new java.util.concurrent.ThreadPoolExecutor(
             0,32,60,java.util.concurrent.TimeUnit.SECONDS,new java.util.concurrent.SynchronousQueue<>(),
             Thread.ofPlatform().daemon().name("harness-turn-",0).factory());
-    @jakarta.annotation.PreDestroy public void close(){turnExecutor.shutdownNow();}
+    @jakarta.annotation.PreDestroy public void close(){turnExecutor.shutdownNow();fileExecutor.shutdownNow();}
     private final CommandDeduplicator deduplicator;
     private final AgentSessionManager sessionManager;
     private final SkillInstallationService skillService;
@@ -51,6 +57,13 @@ public class AgentCommandDispatcher {
     }
 
     public void handle(ProtocolEnvelope envelope) {
+        if(java.util.Set.of("SYNC_WORKSPACE_TREE","CREATE_WORKSPACE_DIRECTORY","UPLOAD_WORKSPACE_FILE","PREPARE_WORKSPACE_DOWNLOAD").contains(envelope.getType())) {
+            try {fileExecutor.execute(() -> handleNow(envelope));}
+            catch(java.util.concurrent.RejectedExecutionException e) {
+                for(AgentEvent result:error(envelope,"AGENT_BUSY","文件操作队列已满")) eventBus.publish(result);
+            }
+            return;
+        }
         if("START_TURN".equals(envelope.getType())) {
             try {turnExecutor.execute(() -> handleNow(envelope));}
             catch(java.util.concurrent.RejectedExecutionException e) {
@@ -70,6 +83,12 @@ public class AgentCommandDispatcher {
         AgentCommandType type = AgentCommandType.valueOf(envelope.getType());
         try {
             switch (type) {
+                case SYNC_WORKSPACE_TREE:
+                case CREATE_WORKSPACE_DIRECTORY:
+                case UPLOAD_WORKSPACE_FILE:
+                case PREPARE_WORKSPACE_DOWNLOAD:
+                    return one(new AgentEvent(AgentEventType.WORKSPACE_FILE_RESULT,envelope.getCorrelationId(),
+                            workspaceFiles.execute(type.name(),codec.payload(envelope,com.myharness.agent.entity.dto.WorkspaceFileCommandDTO.class))));
                 case START_THREAD:
                     return one(sessionManager.startThread(codec.payload(envelope, StartThreadCommandDTO.class)));
                 case START_TURN:

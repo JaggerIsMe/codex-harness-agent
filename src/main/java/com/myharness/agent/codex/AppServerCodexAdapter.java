@@ -350,7 +350,7 @@ public class AppServerCodexAdapter implements CodexGateway {
     @Override
     public String startTurn(String threadId, CodexTurnInput input, CodexEventListener listener) {
         requireText(threadId, "Codex thread ID");
-        if (input == null || !hasText(input.getMessage())) {
+        if (input == null || (!hasText(input.getMessage()) && input.getLocalImages().isEmpty())) {
             throw new CodexException("Turn message must not be blank");
         }
         if (listener == null) {
@@ -369,9 +369,11 @@ public class AppServerCodexAdapter implements CodexGateway {
         // Inherit the profile already verified on thread/start or thread/resume.
         // A turn-level profile name triggers a fresh config load without the thread's inline permissions table.
         ArrayNode inputs = params.putArray("input");
-        ObjectNode text = inputs.addObject();
-        text.put("type", "text");
-        text.put("text", input.getMessage());
+        if(hasText(input.getMessage())) {
+            ObjectNode text = inputs.addObject();
+            text.put("type", "text");
+            text.put("text", input.getMessage());
+        }
         for(String imagePath:input.getLocalImages()) {
             ObjectNode image=inputs.addObject();image.put("type","localImage");image.put("path",imagePath);
         }
