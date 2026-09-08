@@ -32,6 +32,7 @@ harness:
     reconnect-max-delay-seconds: 30
     command-deduplication-size: 1000
     codex-command: codex
+    responses-history-compatibility: true
     strict-project-isolation: true
     windows-sandbox: elevated
     codex-request-timeout-seconds: 30

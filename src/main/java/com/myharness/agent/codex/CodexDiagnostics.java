@@ -14,6 +14,7 @@ final class CodexDiagnostics {
             "(?i)((?:[\\w.-]*(?:api[_-]?key|token|secret|password|authorization)[\\w.-]*)[\"']?\\s*[:=]\\s*)"
                     + "(?:\"[^\"]*\"|'[^']*'|[^\\s,;]+)");
     private static final Pattern OPENAI_KEY = Pattern.compile("\\bsk-[A-Za-z0-9_-]+");
+    private static final Pattern LOCAL_BRIDGE = Pattern.compile("((?:http|ws)://127\\.0\\.0\\.1):\\d+/[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}");
 
     private final Deque<String> lines = new ArrayDeque<>();
     private int characters;
@@ -38,6 +39,7 @@ final class CodexDiagnostics {
         String safe = ANSI.matcher(value).replaceAll("");
         safe = BEARER.matcher(safe).replaceAll("$1<REDACTED>");
         safe = SECRET.matcher(safe).replaceAll("$1<REDACTED>");
+        safe=LOCAL_BRIDGE.matcher(safe).replaceAll("$1:<PORT>/<REDACTED>");
         return OPENAI_KEY.matcher(safe).replaceAll("<REDACTED>");
     }
 }

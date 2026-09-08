@@ -31,6 +31,66 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class CodexAppServerSmokeTest {
     @Test
     @EnabledIfSystemProperty(named = "codex.turn.smoke", matches = "true")
+    void repliesAfterSwitchingManagedProviderToLocalAndBack(@TempDir Path workspace,@TempDir Path data) throws Exception {
+        ObjectMapper json=new ObjectMapper();
+        var provider=com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);
+        provider.createContext("/responses",exchange->{
+            exchange.getRequestBody().readAllBytes();
+            ObjectNode message=json.createObjectNode().put("id","msg-probe").put("type","message")
+                    .put("role","assistant").put("status","completed");
+            message.putArray("content").addObject().put("type","output_text").put("text","HARNESS_OK").putArray("annotations");
+            ObjectNode added=json.createObjectNode().put("type","response.output_item.added").put("output_index",0);
+            added.set("item",message);
+            ObjectNode delta=json.createObjectNode().put("type","response.output_text.delta").put("item_id","msg-probe")
+                    .put("output_index",0).put("content_index",0).put("delta","HARNESS_OK");
+            ObjectNode done=json.createObjectNode().put("type","response.output_item.done").put("output_index",0);done.set("item",message);
+            ObjectNode completed=json.createObjectNode().put("type","response.completed");
+            var response=completed.putObject("response").put("id","resp-probe").put("status","completed");
+            response.putArray("output").add(message);
+            response.putObject("usage").put("input_tokens",1).put("output_tokens",1).put("total_tokens",2);
+            StringBuilder stream=new StringBuilder();
+            for(var event:List.of(added,delta,done,completed))
+                stream.append("event: ").append(event.path("type").asText()).append("\ndata: ").append(event).append("\n\n");
+            byte[] bytes=stream.toString().getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type","text/event-stream");
+            exchange.sendResponseHeaders(200,bytes.length);exchange.getResponseBody().write(bytes);exchange.close();
+        });
+        provider.start();
+        try {
+            var managed=new com.myharness.agent.entity.dto.ModelRuntimeDTO();managed.setSchemaVersion(2);
+            managed.setRuntimeMode("MANAGED_PROVIDER");managed.setRuntimeKey("b".repeat(64));managed.setConfigurationVersionId(1L);
+            managed.setBaseUrl("http://127.0.0.1:"+provider.getAddress().getPort());managed.setModelId("harness-provider-probe");
+            managed.setProviderName("Harness test provider");managed.setApiKey("test-only-key");
+            var local=new com.myharness.agent.entity.dto.ModelRuntimeDTO();local.setSchemaVersion(2);
+            local.setRuntimeMode("LOCAL_CODEX");local.setRuntimeKey("a".repeat(64));
+            var properties=new AgentProperties();properties.setDataDir(data);properties.setCodexRequestTimeoutSeconds(30);
+            String thread;
+            try(var adapter=new AppServerCodexAdapter(properties,json)) {
+                thread=adapter.startThread(new CodexThreadOptions("switch-probe",workspace,managed));
+                assertReply(adapter,thread);
+            }
+            try(var adapter=new AppServerCodexAdapter(properties,json)) {
+                adapter.resumeThread(thread,new CodexThreadOptions("switch-probe",workspace,local));
+                assertReply(adapter,thread,new CodexTurnInput("Reply exactly HARNESS_OK without tools.")
+                        .withExpert("Answer directly.",List.of()));
+            }
+            try(var adapter=new AppServerCodexAdapter(properties,json)) {
+                adapter.resumeThread(thread,new CodexThreadOptions("switch-probe",workspace,managed));
+                assertReply(adapter,thread);
+            }
+        } finally {provider.stop(0);}
+    }
+    @Test
+    void startsExplicitLocalCodexTarget(@TempDir Path workspace) {
+        var runtime=new com.myharness.agent.entity.dto.ModelRuntimeDTO();
+        runtime.setSchemaVersion(2);runtime.setRuntimeMode("LOCAL_CODEX");runtime.setRuntimeKey("a".repeat(64));
+        var properties=new AgentProperties();properties.setCodexRequestTimeoutSeconds(30);
+        try(var adapter=new AppServerCodexAdapter(properties,new ObjectMapper())) {
+            assertNotNull(adapter.startThread(new CodexThreadOptions("local-target-probe",workspace,runtime)));
+        }
+    }
+    @Test
+    @EnabledIfSystemProperty(named = "codex.turn.smoke", matches = "true")
     void resumesThreadCreatedBeforeAnySuccessfulTurn(@TempDir Path workspace, @TempDir Path agentData) throws Exception {
         var properties = new AgentProperties();
         properties.setCodexRequestTimeoutSeconds(45);

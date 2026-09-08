@@ -46,6 +46,8 @@ public class AppServerCodexAdapter implements CodexGateway {
     private final Map<String, CodexEventListener> listenersByThread = new ConcurrentHashMap<>();
     private final Map<String, Path> threadWorkspaces = new ConcurrentHashMap<>();
     private final Map<String, String> threadModels = new ConcurrentHashMap<>();
+    private ResponsesCompatibilityProxy historyProxy;
+    private String historyStartupBase;
     private final Map<String, PendingApproval> pendingApprovals = new ConcurrentHashMap<>();
     private final Map<String, String> messagePhasesByItem = new ConcurrentHashMap<>();
     private final Object lifecycleLock = new Object();
@@ -76,18 +78,18 @@ public class AppServerCodexAdapter implements CodexGateway {
         params.put("cwd", options.getWorkspace().toString());
         params.put("approvalPolicy", INTERACTIVE_APPROVAL_POLICY);
         configureProjectPermissions(params, options.getWorkspace());
-        configureModelProvider(params,options);
+        ModelTarget modelTarget=configureModelTarget(params,options);
+        configureHistoryProxy(params,options,modelTarget);
         configureMcpServers(params,options);
         disableInheritedMcpServers(params,options);
         params.put("ephemeral", false);
         if(options.isIsolatedExpertRuntime()) configureSkillRoots(options.getWorkspace(),options.getExpertSkills());
-        if (hasText(options.getModel())) {
-            params.put("model", options.getModel().trim());
-        }
         JsonNode result = request("thread/start", params);
         verifyPermissionProfile(result,options.getWorkspace());
+        verifyModelTarget(result,modelTarget);
         String threadId = requiredText(result.path("thread"), "id", "thread/start response");
         verifyMcpIsolation(threadId,options);
+        if(historyProxy!=null) historyProxy.bind(threadId);
         threadWorkspaces.put(threadId, options.getWorkspace());
         rememberModel(threadId,result,options.getModel());
         return threadId;
@@ -103,7 +105,6 @@ public class AppServerCodexAdapter implements CodexGateway {
             throw new CodexException("Project ID is required in strict project isolation mode");
         }
         activateModelRuntime(options.getModelRuntime());
-        if(options.isIsolatedExpertRuntime()) configureSkillRoots(options.getWorkspace(),options.getExpertSkills());
         // Verify the persisted root before applying overrides: resume must not move another project's history.
         ObjectNode read = objectMapper.createObjectNode().put("threadId", threadId).put("includeTurns", false);
         JsonNode stored;
@@ -123,12 +124,17 @@ public class AppServerCodexAdapter implements CodexGateway {
         params.put("cwd", options.getWorkspace().toString());
         params.put("approvalPolicy", INTERACTIVE_APPROVAL_POLICY);
         configureProjectPermissions(params, options.getWorkspace());
-        configureModelProvider(params,options);
+        ModelTarget modelTarget=configureModelTarget(params,options);
+        configureHistoryProxy(params,options,modelTarget);
         configureMcpServers(params,options);
         disableInheritedMcpServers(params,options);
-        if (hasText(options.getModel())) params.put("model", options.getModel().trim());
+        // Extra skill roots are process-local. Register after transport bootstrap may restart
+        // the discovery process, and before the resumed thread discovers its expert skills.
+        if(options.isIsolatedExpertRuntime()) configureSkillRoots(options.getWorkspace(),options.getExpertSkills());
+        if(historyProxy!=null) historyProxy.bind(threadId);
         JsonNode resumeResult = request("thread/resume", params);
         verifyPermissionProfile(resumeResult,options.getWorkspace());
+        verifyModelTarget(resumeResult,modelTarget);
         JsonNode resumed = resumeResult.path("thread");
         verifyThreadBinding(resumed, threadId, options.getWorkspace());
         verifyMcpIsolation(threadId,options);
@@ -158,6 +164,58 @@ public class AppServerCodexAdapter implements CodexGateway {
     private void rememberModel(String threadId, JsonNode response, String fallback) {
         String model=response.path("model").asText(fallback);
         if(hasText(model)) threadModels.put(threadId,model);
+    }
+
+    private boolean historyEnabled(CodexThreadOptions options) {
+        return properties.isResponsesHistoryCompatibility() && options.getModelRuntime()!=null && options.getModelRuntime().getSchemaVersion()>=2;
+    }
+    private void configureHistoryProxy(ObjectNode params,CodexThreadOptions options,ModelTarget target) {
+        if(!historyEnabled(options)) return;
+        ObjectNode config=params.withObject("config");
+        boolean managed="MANAGED_PROVIDER".equals(options.getModelRuntime().getRuntimeMode());
+        JsonNode effective=null;boolean chatgpt=false;
+        String upstream=options.getModelRuntime().getBaseUrl(),accountIdentity="";
+        if(!managed) {
+            effective=request("config/read",objectMapper.createObjectNode().put("cwd",options.getWorkspace().toString())).path("config");
+            JsonNode provider=effective.path("model_providers").path(target.provider());
+            if(!"responses".equals(provider.path("wire_api").asText("responses"))) throw new CodexException("HISTORY_INCOMPATIBLE: Local provider must use Responses");
+            JsonNode account=request("account/read",objectMapper.createObjectNode().put("refreshToken",false)).path("account");
+            chatgpt=("openai".equals(target.provider()) || provider.path("requires_openai_auth").asBoolean(false))
+                    && account.path("type").asText().startsWith("chatgpt");
+            accountIdentity=account.path("email").asText();
+            if("openai".equals(target.provider())) {
+                upstream=effective.path("openai_base_url").asText(null);
+                if(upstream==null) upstream=chatgpt?effective.path("chatgpt_base_url").asText("https://chatgpt.com/backend-api").replaceAll("/+$","")+"/codex":"https://api.openai.com/v1";
+            } else upstream=provider.path("base_url").asText(null);
+        }
+        if(historyProxy!=null && historyProxy.baseUrl().equals(upstream)) upstream=historyProxy.upstream();
+        String identity=options.getModelRuntimeKey()+"\n"+target.provider()+"\n"+target.model()+"\n"+upstream+"\n"+accountIdentity;
+        boolean standaloneSearch=!managed && ("openai".equals(target.provider())
+                || effective.path("model_providers").path(target.provider()).path("supports_standalone_web_search").asBoolean(false));
+        if(historyProxy==null) historyProxy=new ResponsesCompatibilityProxy(properties.getDataDir(),options.getWorkspace(),upstream,identity,objectMapper,standaloneSearch);
+        else historyProxy.verifyIdentity(identity);
+        config.withObject("features").put("responses_websockets",false).put("responses_websockets_v2",false);
+        if(!managed && "openai".equals(target.provider())) {
+            config.put("openai_base_url",historyProxy.baseUrl());
+            if(historyStartupBase==null) {
+                // Pin the built-in provider's dedicated base URL override at process startup too.
+                // chatgpt_base_url is not the model transport override. Authentication stays native.
+                if(!threadWorkspaces.isEmpty()) throw new CodexException("HISTORY_INCOMPATIBLE: Cannot reconfigure a loaded transport");
+                historyStartupBase=historyProxy.baseUrl();
+                synchronized(lifecycleLock) {
+                    Process discovery=process;process=null;writer=null;stopProcessTree(discovery);
+                }
+            }
+            return; // Built-in provider IDs cannot be overridden in model_providers.
+        }
+        ObjectNode provider=config.withObject("model_providers").withObject(target.provider());
+        if(!managed) {
+            JsonNode original=effective.path("model_providers").path(target.provider());
+            if(original.isObject()) provider.setAll((ObjectNode)original);
+            if(!provider.hasNonNull("name")) provider.put("name",target.provider());
+        }
+        provider.put("supports_websockets",false);
+        provider.put("base_url",historyProxy.baseUrl());
     }
 
     static void configureExpert(ObjectNode params, CodexTurnInput input, String defaultModel,
@@ -242,14 +300,74 @@ public class AppServerCodexAdapter implements CodexGateway {
     }
 
     private void activateModelRuntime(com.myharness.agent.entity.dto.ModelRuntimeDTO runtime) {
-        if(runtime==null || !hasText(runtime.getModelId())) return;
+        if(runtime==null || (runtime.getSchemaVersion()<2 && !hasText(runtime.getBaseUrl()))) return;
         synchronized(lifecycleLock) {
-            if(process!=null && process.isAlive() && startupModelRuntime!=null
-                    && !java.util.Objects.equals(startupModelRuntime.getRuntimeKey(),runtime.getRuntimeKey()))
+            if(process!=null && process.isAlive()
+                    && !java.util.Objects.equals(startupModelRuntime==null?null:startupModelRuntime.getRuntimeKey(),runtime.getRuntimeKey()))
                 throw new CodexException("运行中的 App Server 不能切换模型 Provider");
             startupModelRuntime=runtime;
         }
     }
+
+    private ModelTarget configureModelTarget(ObjectNode params,CodexThreadOptions options) {
+        var runtime=options.getModelRuntime();
+        if(runtime!=null && runtime.getSchemaVersion()>=2 && "LOCAL_CODEX".equals(runtime.getRuntimeMode())) {
+            ModelTarget target=resolveLocalModelTarget(options.getWorkspace());
+            params.put("model",target.model());params.put("modelProvider",target.provider());
+            return target;
+        }
+        configureModelProvider(params,options);
+        if(hasText(options.getModel())) params.put("model",options.getModel().trim());
+        if(runtime!=null && runtime.getSchemaVersion()>=2 && "MANAGED_PROVIDER".equals(runtime.getRuntimeMode())) {
+            params.put("modelProvider","harness_managed");
+            return new ModelTarget("harness_managed",options.getModel().trim(),true);
+        }
+        return new ModelTarget(null,options.getModel(),false);
+    }
+
+    private ModelTarget resolveLocalModelTarget(Path workspace) {
+        ObjectNode read=objectMapper.createObjectNode();read.put("cwd",workspace.toString());
+        JsonNode config=request("config/read",read);
+        ObjectNode list=objectMapper.createObjectNode();list.put("limit",1000);list.put("includeHidden",true);
+        return selectLocalModelTarget(config,request("model/list",list));
+    }
+
+    static ModelTarget selectLocalModelTarget(JsonNode configResult,JsonNode modelListResult) {
+        JsonNode config=configResult.path("config").isObject()?configResult.path("config"):configResult;
+        String provider=config.path("model_provider").asText("openai").trim();
+        if(provider.isEmpty()) provider="openai";
+        String configured=config.path("model").asText(null);
+        List<String> defaults=new ArrayList<>();boolean configuredAvailable=false;
+        for(JsonNode item:modelListResult.path("data")) {
+            String model=modelId(item);
+            if(model==null) continue;
+            if(model.equals(configured)) configuredAvailable=true;
+            if(item.path("isDefault").asBoolean(false)) defaults.add(model);
+        }
+        String selected=configuredAvailable?configured:(defaults.size()==1?defaults.get(0):null);
+        if(!hasText(selected)) throw new CodexException("本地 Codex 未能解析唯一可用的默认模型，已阻止运行目标切换");
+        return new ModelTarget(provider,selected,true);
+    }
+
+    private static String modelId(JsonNode item) {
+        for(String field:List.of("model","id","slug")) {
+            String value=item.path(field).asText(null);
+            if(hasText(value)) return value.trim();
+        }
+        return null;
+    }
+
+    private void verifyModelTarget(JsonNode response,ModelTarget expected) {
+        if(expected==null || !expected.strict()) return;
+        // start/resume return the activated configuration at the top level. The nested
+        // Thread can still carry its persisted provider from before the runtime switch.
+        String actualModel=requiredText(response,"model","Codex runtime response");
+        String actualProvider=requiredText(response,"modelProvider","Codex runtime response");
+        if(!expected.model().equals(actualModel) || !expected.provider().equals(actualProvider))
+            throw new CodexException("Codex 激活的模型运行目标与 Device 配置不一致，已阻止执行");
+    }
+
+    static record ModelTarget(String provider,String model,boolean strict) { }
 
     void configureModelProvider(ObjectNode params,CodexThreadOptions options) {
         var runtime=options.getModelRuntime();
@@ -380,6 +498,8 @@ public class AppServerCodexAdapter implements CodexGateway {
         configureExpert(params,input,threadModels.get(threadId),expertSkills);
         listenersByThread.put(threadId, listener);
         try {
+            if(historyProxy!=null) historyProxy.onNotice(notice->listener.onEvent(new CodexEvent(TurnEventType.WARNING,null,notice,
+                    objectMapper.createObjectNode().put("type","historyCompatibility").put("policy",ResponsesHistoryPolicy.POLICY))));
             JsonNode result = request("turn/start", params);
             String turnId = requiredText(result.path("turn"), "id", "turn/start response");
             listenersByTurn.put(turnId, listener);
@@ -466,9 +586,14 @@ public class AppServerCodexAdapter implements CodexGateway {
                 List<String> command = CodexProcessCommand.appServer(properties.getCodexCommand(),
                         properties.isStrictProjectIsolation(),properties.getWindowsSandbox(),modelCatalog);
                 LOGGER.info("Starting Codex App Server with command {} in {}", command, System.getProperty("user.dir"));
+                if(historyStartupBase!=null) command=CodexProcessCommand.appServer(properties.getCodexCommand(),properties.isStrictProjectIsolation(),properties.getWindowsSandbox(),modelCatalog,
+                        List.of("openai_base_url=\""+historyStartupBase+"\"","features.responses_websockets=false","features.responses_websockets_v2=false"));
                 ProcessBuilder builder=new ProcessBuilder(command);
-                if(startupModelRuntime!=null && hasText(startupModelRuntime.getApiKey()))
+                if(startupModelRuntime!=null && (startupModelRuntime.getSchemaVersion()<2
+                        || "MANAGED_PROVIDER".equals(startupModelRuntime.getRuntimeMode()))
+                        && hasText(startupModelRuntime.getApiKey()))
                     builder.environment().put("HARNESS_MODEL_API_KEY",startupModelRuntime.getApiKey());
+                else builder.environment().remove("HARNESS_MODEL_API_KEY");
                 Process started = builder.start();
                 process = started;
                 runtimeFailed=false;
@@ -529,7 +654,7 @@ public class AppServerCodexAdapter implements CodexGateway {
                 }
             }
         } catch (Exception exception) {
-            if (!closing) {
+            if (!closing && process == started) {
                 failRuntime("Unable to read Codex App Server output", exception);
             }
         }
@@ -778,6 +903,7 @@ public class AppServerCodexAdapter implements CodexGateway {
         process = null;
         writer = null;
         stopProcessTree(current);
+        if(historyProxy!=null) {historyProxy.close();historyProxy=null;}
         CodexException closed = new CodexException("Codex App Server was stopped");
         for (CompletableFuture<JsonNode> future : pendingRequests.values()) {
             future.completeExceptionally(closed);
@@ -886,7 +1012,7 @@ public class AppServerCodexAdapter implements CodexGateway {
         return value == null || value.isNull() ? null : value.asText();
     }
 
-    private boolean hasText(String value) {
+    private static boolean hasText(String value) {
         return value != null && !value.trim().isEmpty();
     }
 

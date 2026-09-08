@@ -4,9 +4,10 @@ import java.util.List;
 
 public class ModelRuntimeDTO {
     private int schemaVersion=1; private Long configurationId; private Long configurationVersionId; private Long versionNo;
-    private String configurationCode; private String name; private String providerName; private String baseUrl;
+    private String runtimeMode; private String configurationCode; private String name; private String providerName; private String baseUrl;
     private String modelId; private List<String> inputModalities=List.of("TEXT"); private int contextWindowTokens=128000; private String configDigest; private String runtimeKey; private String apiKey;
     public int getSchemaVersion(){return schemaVersion;} public void setSchemaVersion(int v){schemaVersion=v;}
+    public String getRuntimeMode(){return runtimeMode;} public void setRuntimeMode(String v){runtimeMode=v;}
     public Long getConfigurationId(){return configurationId;} public void setConfigurationId(Long v){configurationId=v;}
     public Long getConfigurationVersionId(){return configurationVersionId;} public void setConfigurationVersionId(Long v){configurationVersionId=v;}
     public Long getVersionNo(){return versionNo;} public void setVersionNo(Long v){versionNo=v;}

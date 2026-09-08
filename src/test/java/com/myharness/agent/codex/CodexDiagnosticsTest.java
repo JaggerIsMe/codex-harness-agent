@@ -6,6 +6,13 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CodexDiagnosticsTest {
+    @Test void redactsEphemeralCompatibilityRoute() {
+        for(String scheme:java.util.List.of("http", "ws")) {
+            String safe=CodexDiagnostics.redact(scheme+"://127.0.0.1:12345/01234567-89ab-cdef-0123-456789abcdef/responses");
+            assertFalse(safe.contains("01234567"));assertTrue(safe.endsWith("/responses"));
+            assertTrue(safe.startsWith(scheme+"://"));
+        }
+    }
     @Test
     void redactsCredentialsInPlainTextAndJson() {
         String safe = CodexDiagnostics.redact("api_key=plain-secret password='two words' "

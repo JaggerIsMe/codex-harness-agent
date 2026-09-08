@@ -26,7 +26,8 @@ public class CodexThreadOptions {
     public CodexThreadOptions(String projectId, Path workspace, Object modelOrRuntime) {
         this.projectId = projectId;
         this.workspace = workspace;
-        if(modelOrRuntime instanceof com.myharness.agent.entity.dto.ModelRuntimeDTO runtime) this.modelRuntime=runtime;
+        if(modelOrRuntime==null) this.modelRuntime=null;
+        else if(modelOrRuntime instanceof com.myharness.agent.entity.dto.ModelRuntimeDTO runtime) this.modelRuntime=runtime;
         else {com.myharness.agent.entity.dto.ModelRuntimeDTO runtime=new com.myharness.agent.entity.dto.ModelRuntimeDTO();runtime.setModelId((String)modelOrRuntime);this.modelRuntime=runtime;}
     }
 

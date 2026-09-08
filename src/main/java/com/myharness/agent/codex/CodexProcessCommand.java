@@ -29,6 +29,9 @@ final class CodexProcessCommand {
     static List<String> appServer(String configuredCommand,boolean strictIsolation,String windowsSandbox,Path modelCatalog) {
         return appServer(configuredCommand,strictIsolation,windowsSandbox,System.getProperty("os.name"),System.getenv("PATH"),System.getenv("ComSpec"),modelCatalog);
     }
+    static List<String> appServer(String configuredCommand,boolean strictIsolation,String windowsSandbox,Path modelCatalog,List<String> overrides) {
+        return appServer(configuredCommand,strictIsolation,windowsSandbox,System.getProperty("os.name"),System.getenv("PATH"),System.getenv("ComSpec"),modelCatalog,overrides);
+    }
 
     static List<String> appServer(String configuredCommand,boolean strictIsolation,String windowsSandbox,
                                   String osName,String pathValue,String commandShell) {
@@ -37,6 +40,10 @@ final class CodexProcessCommand {
 
     static List<String> appServer(String configuredCommand,boolean strictIsolation,String windowsSandbox,
                                   String osName,String pathValue,String commandShell,Path modelCatalog) {
+        return appServer(configuredCommand,strictIsolation,windowsSandbox,osName,pathValue,commandShell,modelCatalog,List.of());
+    }
+    private static List<String> appServer(String configuredCommand,boolean strictIsolation,String windowsSandbox,
+                                  String osName,String pathValue,String commandShell,Path modelCatalog,List<String> overrides) {
         String configured = configuredCommand == null ? "" : configuredCommand.trim();
         if (configured.isEmpty()) {
             throw new CodexException("Codex command must be configured");
@@ -63,6 +70,7 @@ final class CodexProcessCommand {
             arguments.add("-c");
             arguments.add("model_catalog_json=\""+modelCatalog.toAbsolutePath().normalize().toString().replace('\\','/')+"\"");
         }
+        for(String override:overrides) {arguments.add("-c");arguments.add(override);}
         arguments.add("--stdio");
 
         if (windows) {

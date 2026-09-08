@@ -134,7 +134,8 @@ public class AgentSessionManager {
             if(preparedAttachments==null) preparedAttachments=new com.myharness.agent.attachment.PreparedTurnAttachments(
                     attachments.prepare(command,active.preparation),java.util.List.of());
             String message=preparedAttachments.message();
-            if(!preparedAttachments.localImages().isEmpty()&&command.getModelRuntime()!=null&&!command.getModelRuntime().supports("IMAGE"))
+            if(!preparedAttachments.localImages().isEmpty()&&command.getModelRuntime()!=null
+                    &&!"LOCAL_CODEX".equals(command.getModelRuntime().getRuntimeMode())&&!command.getModelRuntime().supports("IMAGE"))
                 throw new AgentOperationException("MODEL_MODALITY_UNSUPPORTED","当前 Device 模型不支持图片输入");
             var preparedSkills=expertSkills.prepare(command,active.preparation);
             active.preparation.check();
@@ -351,6 +352,11 @@ public class AgentSessionManager {
                     throw new AgentOperationException("CONVERSATION_BINDING_MISMATCH",
                             "Conversation project, workspace or Codex thread does not match its existing binding");
                 }
+                if(command.getExpertRuntime()==null && isExplicitModelTarget(command)) {
+                    codexGateway.resumeThread(existing.codexThreadId,
+                            new CodexThreadOptions(existing.projectId,existing.workspace,command.getModelRuntime()));
+                    existing.modelRuntimeKey=command.getModelRuntime().getRuntimeKey();
+                }
                 return existing;
             }
             if (sessions.values().stream().anyMatch(value -> value.codexThreadId.equals(command.getCodexThreadId()))) {
@@ -369,7 +375,7 @@ public class AgentSessionManager {
                 var options = new CodexThreadOptions(command.getProjectId(), workspace, command.getModelRuntime());
                 try { codexGateway.resumeThread(restoredThreadId, options); }
                 catch (CodexThreadNotLoadedException missing) {
-                    if (!command.isRecreateUnstartedThread()) throw missing;
+                    if (isExplicitModelTarget(command) || !command.isRecreateUnstartedThread()) throw missing;
                     restoredThreadId = codexGateway.startThread(options);
                     eventBus.publish(new AgentEvent(AgentEventType.THREAD_STARTED, command.getConversationId(),
                             new ThreadStartedEventDTO(command.getConversationId(), restoredThreadId,
@@ -389,11 +395,30 @@ public class AgentSessionManager {
 
     private void validateModelRuntime(com.myharness.agent.entity.dto.ModelRuntimeDTO runtime) {
         if(runtime==null) return; // Rolling-upgrade compatibility with Servers that predate managed providers.
-        if(runtime.getSchemaVersion()!=1 || runtime.getModelId()==null || runtime.getModelId().isBlank()
-                || runtime.getBaseUrl()==null || runtime.getBaseUrl().isBlank() || runtime.getApiKey()==null || runtime.getApiKey().isBlank()
-                || runtime.getRuntimeKey()==null || !runtime.getRuntimeKey().matches("[0-9a-f]{64}"))
-            throw new AgentOperationException("MODEL_CONFIG_INVALID","需要有效的 Device 托管模型运行配置");
+        boolean validKey=runtime.getRuntimeKey()!=null && runtime.getRuntimeKey().matches("[0-9a-f]{64}");
+        if(runtime.getSchemaVersion()==1) {
+            if(runtime.getModelId()==null || runtime.getModelId().isBlank() || runtime.getBaseUrl()==null || runtime.getBaseUrl().isBlank()
+                    || runtime.getApiKey()==null || runtime.getApiKey().isBlank() || !validKey)
+                throw new AgentOperationException("MODEL_CONFIG_INVALID","需要有效的 Device 托管模型运行配置");
+            return;
+        }
+        if(runtime.getSchemaVersion()!=2 || !validKey)
+            throw new AgentOperationException("MODEL_CONFIG_INVALID","需要受支持的 Device 模型运行目标");
+        if("LOCAL_CODEX".equals(runtime.getRuntimeMode())) {
+            if(hasText(runtime.getBaseUrl()) || hasText(runtime.getModelId()) || hasText(runtime.getApiKey()) || runtime.getConfigurationVersionId()!=null)
+                throw new AgentOperationException("MODEL_CONFIG_INVALID","本地 Codex 运行目标不能包含第三方模型配置");
+            return;
+        }
+        if(!"MANAGED_PROVIDER".equals(runtime.getRuntimeMode()) || runtime.getConfigurationVersionId()==null
+                || !hasText(runtime.getModelId()) || !hasText(runtime.getBaseUrl()) || !hasText(runtime.getApiKey()))
+            throw new AgentOperationException("MODEL_CONFIG_INVALID","需要有效的 Device 第三方模型运行配置");
     }
+
+    private boolean isExplicitModelTarget(StartTurnCommandDTO command) {
+        return command.getModelRuntime()!=null && command.getModelRuntime().getSchemaVersion()>=2;
+    }
+
+    private boolean hasText(String value) {return value!=null && !value.isBlank();}
 
     private void require(String value, String field) {
         if (value == null || value.trim().isEmpty()) {
@@ -410,11 +435,11 @@ public class AgentSessionManager {
             throw new AgentOperationException("CONVERSATION_BINDING_MISMATCH","Conversation 不能切换到另一个 Expert");
         var options=new CodexThreadOptions(session.projectId,session.workspace,command.getModelRuntime())
                 .withExpertRuntime(skills,runtime.getMcpServers()==null ? java.util.List.of() : runtime.getMcpServers());
-        boolean modelChanged=session.modelRuntimeKey!=null && command.getModelRuntime()!=null
-                && !java.util.Objects.equals(session.modelRuntimeKey,command.getModelRuntime().getRuntimeKey());
+        String nextModelRuntimeKey=command.getModelRuntime()==null?null:command.getModelRuntime().getRuntimeKey();
+        boolean modelChanged=!java.util.Objects.equals(session.modelRuntimeKey,nextModelRuntimeKey);
         if(java.util.Objects.equals(session.runtimeKey,runtime.getRuntimeKey())) {
             try {codexGateway.resumeThread(session.codexThreadId,options);session.expertId=runtime.getExpertId();session.modelRuntimeKey=command.getModelRuntime()==null?null:command.getModelRuntime().getRuntimeKey();return session.needsHistory;}
-            catch(CodexThreadNotLoadedException missing) {if(modelChanged||!command.isRecreateUnstartedThread()) throw missing;}
+            catch(CodexThreadNotLoadedException missing) {if(modelChanged||isExplicitModelTarget(command)||!command.isRecreateUnstartedThread()) throw missing;}
         }
         if(session.runtimeKey!=null && runtime.getSchemaVersion()>=3
                 && runtime.isCompatibleUpgrade() && runtime.getExpertId()!=null) {
@@ -429,7 +454,7 @@ public class AgentSessionManager {
                 session.modelRuntimeKey=command.getModelRuntime()==null?null:command.getModelRuntime().getRuntimeKey();
                 return false;
             } catch(CodexThreadNotLoadedException missing) {
-                if(modelChanged||!command.isRecreateUnstartedThread()) throw missing;
+                if(modelChanged||isExplicitModelTarget(command)||!command.isRecreateUnstartedThread()) throw missing;
             }
         }
         cancellation.check();String previous=session.codexThreadId;

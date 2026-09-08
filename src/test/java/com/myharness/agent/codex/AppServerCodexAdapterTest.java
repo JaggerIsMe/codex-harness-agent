@@ -22,6 +22,67 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class AppServerCodexAdapterTest {
+    @Test void rejectsMissingOrMismatchedEffectiveTargetDespiteMatchingThreadMetadata(@TempDir Path workspace) {
+        var mapper=new ObjectMapper();
+        var runtime=new com.myharness.agent.entity.dto.ModelRuntimeDTO();runtime.setSchemaVersion(2);
+        runtime.setRuntimeMode("MANAGED_PROVIDER");runtime.setRuntimeKey("b".repeat(64));runtime.setModelId("test-model");
+        runtime.setBaseUrl("https://models.example/v1");runtime.setApiKey("test-only-key");
+        for(boolean resume:List.of(false,true)) for(String field:List.of("model","modelProvider")) for(boolean missing:List.of(false,true)) {
+            var adapter=new AppServerCodexAdapter(new AgentProperties(),mapper) {
+                @Override JsonNode request(String method,JsonNode input) {
+                    ObjectNode result=mapper.createObjectNode();
+                    result.putObject("thread").put("id","original-thread").put("cwd",workspace.toString())
+                            .put("model","test-model").put("modelProvider","harness_managed");
+                    if("thread/read".equals(method)) return result;
+                    assertTrue("thread/start".equals(method) || "thread/resume".equals(method));
+                    result.putObject("activePermissionProfile").put("id",input.path("permissions").asText());
+                    result.put("model","test-model").put("modelProvider","harness_managed");
+                    if(missing) result.remove(field);else result.put(field,"unexpected");
+                    return result;
+                }
+            };
+            var options=new CodexThreadOptions("project",workspace,runtime);
+            assertThrows(CodexException.class,()->{if(resume) adapter.resumeThread("original-thread",options);else adapter.startThread(options);});
+            assertThrows(CodexException.class,()->adapter.startTurn("original-thread",new CodexTurnInput("hello"),
+                    org.mockito.Mockito.mock(CodexEventListener.class)));
+        }
+    }
+    @Test void resolvesAndPinsLocalCodexTargetWhenResumingAnExistingThread(@TempDir Path workspace) {
+        var mapper=new ObjectMapper();var methods=new ArrayList<String>();var requests=new ArrayList<JsonNode>();
+        var adapter=new AppServerCodexAdapter(new AgentProperties(),mapper) {
+            @Override JsonNode request(String method,JsonNode input) {
+                methods.add(method);requests.add(input.deepCopy());ObjectNode result=mapper.createObjectNode();
+                if("thread/read".equals(method)) {
+                    result.putObject("thread").put("id","thread-local").put("cwd",workspace.toString()).putObject("status").put("type","notLoaded");
+                } else if("config/read".equals(method)) {
+                    result.putObject("config").put("model_provider","openai").put("model","gpt-local");
+                } else if("model/list".equals(method)) {
+                    result.putArray("data").addObject().put("model","gpt-local").put("isDefault",true);
+                } else if("thread/resume".equals(method)) {
+                    result.putObject("activePermissionProfile").put("id",input.path("permissions").asText());
+                    result.put("model","gpt-local").put("modelProvider","openai");
+                    result.putObject("thread").put("id","thread-local").put("cwd",workspace.toString())
+                            .put("model","deepseek-v4-flash").put("modelProvider","harness_managed").putObject("status").put("type","idle");
+                } else if("skills/list".equals(method)) {
+                    result.putArray("data");
+                } else if("turn/start".equals(method)) {
+                    assertEquals("gpt-local",input.path("collaborationMode").path("settings").path("model").asText());
+                    result.putObject("turn").put("id","local-turn");
+                } else throw new AssertionError("Unexpected RPC: "+method);
+                return result;
+            }
+        };
+        var runtime=new com.myharness.agent.entity.dto.ModelRuntimeDTO();runtime.setSchemaVersion(2);runtime.setRuntimeMode("LOCAL_CODEX");runtime.setRuntimeKey("a".repeat(64));
+
+        adapter.resumeThread("thread-local",new CodexThreadOptions("project",workspace,runtime));
+
+        assertEquals(List.of("thread/read","config/read","model/list","thread/resume"),methods);
+        JsonNode resume=requests.getLast();assertEquals("gpt-local",resume.path("model").asText());assertEquals("openai",resume.path("modelProvider").asText());
+        assertFalse(resume.path("config").has("model_providers"));
+        assertEquals("local-turn",adapter.startTurn("thread-local",
+                new CodexTurnInput("hello").withExpert("Reply directly",List.of()),
+                org.mockito.Mockito.mock(CodexEventListener.class)));
+    }
     @Test void rejectsRemovedHttpEnvironmentMappingFields() {
         var mapper=new ObjectMapper();
         assertThrows(Exception.class,() -> mapper.readValue("{\"serverCode\":\"remote\",\"envHttpHeaders\":{\"X-Key\":\"MCP_KEY\"}}",

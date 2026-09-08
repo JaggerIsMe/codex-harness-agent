@@ -17,6 +17,9 @@ import java.util.List;
 @Validated
 @ConfigurationProperties(prefix = "harness.agent")
 public class AgentProperties {
+    private boolean responsesHistoryCompatibility;
+    public boolean isResponsesHistoryCompatibility(){return responsesHistoryCompatibility;}
+    public void setResponsesHistoryCompatibility(boolean value){responsesHistoryCompatibility=value;}
     private long maxAttachmentBytes=20L*1024*1024;
     private long maxTurnAttachmentBytes=50L*1024*1024;
     public long getMaxAttachmentBytes(){return maxAttachmentBytes;}

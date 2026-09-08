@@ -38,6 +38,30 @@ class ManagedModelRuntimeTest {
         } finally {gateway.close();}
     }
 
+    @Test void switchesManagedToLocalAndBackByReplacingOnlyTheProcess() {
+        AtomicInteger created=new AtomicInteger();List<FakeGateway> instances=new ArrayList<>();
+        ConversationCodexGateway gateway=new ConversationCodexGateway(()->{FakeGateway value=new FakeGateway("thread-1");instances.add(value);created.incrementAndGet();return value;});
+        try {
+            String id=gateway.startThread(new CodexThreadOptions("project",workspace,runtime("a","one")));
+            gateway.resumeThread(id,new CodexThreadOptions("project",workspace,localRuntime()));
+            gateway.resumeThread(id,new CodexThreadOptions("project",workspace,runtime("b","two")));
+            assertEquals(3,created.get());assertEquals("thread-1",instances.get(1).resumed);assertEquals("thread-1",instances.get(2).resumed);
+            assertTrue(instances.get(0).closed);assertTrue(instances.get(1).closed);
+        } finally {gateway.close();}
+    }
+
+    @Test void localTargetUsesConfiguredModelOrAUniqueCodexDefault() {
+        ObjectMapper json=new ObjectMapper();ObjectNode config=json.createObjectNode();
+        config.putObject("config").put("model_provider","openai").put("model","gpt-configured");
+        ObjectNode models=json.createObjectNode();models.putArray("data").addObject().put("model","gpt-configured").put("isDefault",false);
+        var configured=AppServerCodexAdapter.selectLocalModelTarget(config,models);
+        assertEquals("openai",configured.provider());assertEquals("gpt-configured",configured.model());
+
+        ((ObjectNode)config.path("config")).remove("model");
+        models.withArray("data").addObject().put("model","gpt-default").put("isDefault",true);
+        assertEquals("gpt-default",AppServerCodexAdapter.selectLocalModelTarget(config,models).model());
+    }
+
     @Test void customModelProcessLoadsACompleteMetadataCatalog() throws Exception {
         ModelRuntimeDTO runtime=runtime("c","secret");runtime.setContextWindowTokens(128000);
         Path catalog=new ManagedModelCatalog(new ObjectMapper()).write(workspace,runtime);
@@ -52,7 +76,8 @@ class ManagedModelRuntimeTest {
         assertTrue(String.join(" ",command).contains("model_catalog_json"));
     }
 
-    private ModelRuntimeDTO runtime(String suffix,String secret){ModelRuntimeDTO r=new ModelRuntimeDTO();r.setRuntimeKey(String.valueOf(suffix).repeat(64));r.setModelId("DeepSeek-V4-Flash-Vision-Exp");r.setProviderName("DeepSeek");r.setBaseUrl("https://models.example/v1");r.setApiKey(secret);r.setInputModalities(List.of("TEXT","IMAGE"));return r;}
+    private ModelRuntimeDTO runtime(String suffix,String secret){ModelRuntimeDTO r=new ModelRuntimeDTO();r.setSchemaVersion(2);r.setRuntimeMode("MANAGED_PROVIDER");r.setConfigurationVersionId(1L);r.setRuntimeKey(String.valueOf(suffix).repeat(64));r.setModelId("DeepSeek-V4-Flash-Vision-Exp");r.setProviderName("DeepSeek");r.setBaseUrl("https://models.example/v1");r.setApiKey(secret);r.setInputModalities(List.of("TEXT","IMAGE"));return r;}
+    private ModelRuntimeDTO localRuntime(){ModelRuntimeDTO r=new ModelRuntimeDTO();r.setSchemaVersion(2);r.setRuntimeMode("LOCAL_CODEX");r.setRuntimeKey("l".repeat(64));return r;}
     private static final class FakeGateway implements CodexGateway {
         private final String id;private String resumed;private boolean closed;FakeGateway(String id){this.id=id;}
         public String startThread(CodexThreadOptions o){return id;}public void resumeThread(String id,CodexThreadOptions o){resumed=id;}

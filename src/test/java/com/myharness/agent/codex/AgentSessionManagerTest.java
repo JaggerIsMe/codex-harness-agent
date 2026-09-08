@@ -284,6 +284,17 @@ class AgentSessionManagerTest {
         assertEquals(0,gateway.threadSequence);assertEquals(0,events.size());
     }
 
+    @Test void explicitModelTargetNeverRecreatesAMissingThread() {
+        gateway.missingThread=true;
+        var command=recoverableTurn("2","7");command.setRecreateUnstartedThread(true);
+        var runtime=new com.myharness.agent.entity.dto.ModelRuntimeDTO();runtime.setSchemaVersion(2);
+        runtime.setRuntimeMode("LOCAL_CODEX");runtime.setRuntimeKey("a".repeat(64));command.setModelRuntime(runtime);
+
+        assertThrows(CodexThreadNotLoadedException.class,()->manager.startTurn(command));
+
+        assertEquals(0,gateway.threadSequence);assertEquals(0,events.size());
+    }
+
     @Test
     void recoveryCannotReuseAnotherProjectsWorkspaceOrChangeAnExistingConversation() {
         manager.startThread(thread("existing"));
