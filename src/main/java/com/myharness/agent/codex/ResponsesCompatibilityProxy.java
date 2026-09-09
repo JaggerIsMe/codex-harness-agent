@@ -25,16 +25,19 @@ final class ResponsesCompatibilityProxy implements AutoCloseable {
     private final Path data,workspace;
     private final String upstream,identity,prefix="/"+UUID.randomUUID();
     private final boolean standaloneSearch;
+    private final boolean imageGeneration;
     private String thread;
     private volatile ResponsesHistoryPolicy policy;
     private volatile Consumer<String> notice=ignored->{ };
     private final Set<String> notified=ConcurrentHashMap.newKeySet();
     private final java.util.concurrent.atomic.AtomicLong requests=new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong searchRequests=new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong imageRequests=new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong received=new java.util.concurrent.atomic.AtomicLong();
     private volatile String lastFailure="none";
     private volatile int lastStatus;
     private volatile int lastSearchStatus;
+    private volatile int lastImageStatus;
     private volatile String lastMime="none";
     private volatile String lastEvent="none";
 
@@ -42,7 +45,11 @@ final class ResponsesCompatibilityProxy implements AutoCloseable {
         this(data,workspace,upstream,identity,json,false);
     }
     ResponsesCompatibilityProxy(Path data,Path workspace,String upstream,String identity,ObjectMapper json,boolean standaloneSearch) {
+        this(data,workspace,upstream,identity,json,standaloneSearch,false);
+    }
+    ResponsesCompatibilityProxy(Path data,Path workspace,String upstream,String identity,ObjectMapper json,boolean standaloneSearch,boolean imageGeneration) {
         this.standaloneSearch=standaloneSearch;
+        this.imageGeneration=imageGeneration;
         this.data=data;this.workspace=workspace;this.identity=identity;this.json=json;
         try {
             URI url=URI.create(upstream);
@@ -58,7 +65,7 @@ final class ResponsesCompatibilityProxy implements AutoCloseable {
     String baseUrl() {return "http://127.0.0.1:"+server.getAddress().getPort()+prefix;}
     String upstream() {return upstream;}
     long requestCount() {return requests.get();}
-    String diagnostics() {return "received="+received.get()+", forwarded="+requests.get()+", searchForwarded="+searchRequests.get()+", searchStatus="+lastSearchStatus+", upstreamStatus="+lastStatus+", mime="+lastMime+", event="+lastEvent+", failure="+lastFailure;}
+    String diagnostics() {return "received="+received.get()+", forwarded="+requests.get()+", searchForwarded="+searchRequests.get()+", searchStatus="+lastSearchStatus+", imageForwarded="+imageRequests.get()+", imageStatus="+lastImageStatus+", upstreamStatus="+lastStatus+", mime="+lastMime+", event="+lastEvent+", failure="+lastFailure;}
     void verifyIdentity(String expected) {if(!identity.equals(expected)) throw ResponsesHistoryPolicy.failure("Cannot change an active bridge target");}
     synchronized void bind(String threadId) {
         if(thread!=null) {if(!thread.equals(threadId)) throw ResponsesHistoryPolicy.failure("Bridge is bound to another Conversation");return;}
@@ -72,13 +79,15 @@ final class ResponsesCompatibilityProxy implements AutoCloseable {
             String path=exchange.getRequestURI().getRawPath();
             String suffix=path.startsWith(prefix+"/")?path.substring(prefix.length()):"";
             boolean search=standaloneSearch && "/alpha/search".equals(suffix);
+            boolean image=imageGeneration && Set.of("/images/generations","/images/edits").contains(suffix);
+            boolean standaloneTool=search || image;
             if("GET".equals(exchange.getRequestMethod()) && Set.of("/responses","/codex/responses").contains(suffix)
                     && exchange.getRequestURI().getRawQuery()==null && !exchange.getRequestHeaders().containsKey("Origin")
                     && "websocket".equalsIgnoreCase(exchange.getRequestHeaders().getFirst("Upgrade"))) {
                 // Codex recognizes 426 as an HTTP-only endpoint; 404 causes repeated reconnects.
                 error(exchange,426,"This Responses endpoint requires HTTP POST with SSE, not WebSocket");return;
             }
-            if(!"POST".equals(exchange.getRequestMethod()) || (!search && !Set.of("/responses","/responses/compact","/codex/responses","/codex/responses/compact").contains(suffix))
+            if(!"POST".equals(exchange.getRequestMethod()) || (!standaloneTool && !Set.of("/responses","/responses/compact","/codex/responses","/codex/responses/compact").contains(suffix))
                     || exchange.getRequestURI().getRawQuery()!=null || exchange.getRequestHeaders().containsKey("Origin") || exchange.getRequestHeaders().containsKey("Upgrade")) {
                 lastFailure="unsupported route, method or upgrade";error(exchange,404,"Unsupported compatibility bridge route");return;
             }
@@ -89,7 +98,7 @@ final class ResponsesCompatibilityProxy implements AutoCloseable {
                 body=bounded(decoded);
                 // Standalone tools share the provider base URL, but have no Responses history.
                 // Preserve their payload bytes; never project or learn provenance from tool results.
-                if(!search) {
+                if(!standaloneTool) {
                     var projection=policy.project(json.readTree(body));
                     if(projection.excludedReasoning()>0 && notified.add("reasoning")) notice.accept("已按 "+ResponsesHistoryPolicy.POLICY+" 兼容当前模型：本次请求未发送 "+projection.excludedReasoning()+" 条其他提供商或来源未验证的思考记录；原始会话历史保持不变。");
                     if(projection.convertedSearches()>0 && notified.add("search")) notice.accept("已按 search-portable-v1 将 "+projection.convertedSearches()+" 条异源或来源未验证的搜索记录转换为带来源标记的历史文本；仅保留已有查询、来源等信息，不补造缺失结果，不重放搜索；原始历史保持不变。");
@@ -97,7 +106,7 @@ final class ResponsesCompatibilityProxy implements AutoCloseable {
                     body=json.writeValueAsBytes(projection.request());
                 }
             }
-            if(search) searchRequests.incrementAndGet();else requests.incrementAndGet();
+            if(search) searchRequests.incrementAndGet();else if(image) imageRequests.incrementAndGet();else requests.incrementAndGet();
             var builder=HttpRequest.newBuilder(URI.create(upstream+suffix)).timeout(Duration.ofMinutes(5))
                     .POST(HttpRequest.BodyPublishers.ofByteArray(body));
             exchange.getRequestHeaders().forEach((key,values)->{if(forwardHeader(key)) values.forEach(value->builder.header(key,value));});
@@ -105,20 +114,21 @@ final class ResponsesCompatibilityProxy implements AutoCloseable {
             HttpResponse<InputStream> response=client.send(builder.build(),HttpResponse.BodyHandlers.ofInputStream());
             lastStatus=response.statusCode();
             if(search) lastSearchStatus=response.statusCode();
+            if(image) lastImageStatus=response.statusCode();
             lastMime=response.headers().firstValue("content-type").orElse("none").replaceAll("[^a-zA-Z0-9/;= ._-]","");
             try(InputStream rawInput=response.body();InputStream input=decode(rawInput,response.headers().firstValue("content-encoding").orElse(null))) {
                 streams.add(rawInput);
                 if(response.statusCode()>=300 && response.statusCode()<400) throw ResponsesHistoryPolicy.failure("Provider redirect refused");
                 response.headers().map().forEach((key,values)->{if(forwardHeader(key)) exchange.getResponseHeaders().put(key,values);});
                 String contentType=response.headers().firstValue("content-type").orElse("");
-                boolean sse=!search && (contentType.contains("text/event-stream") || (contentType.isBlank() && requestStream));
+                boolean sse=!standaloneTool && (contentType.contains("text/event-stream") || (contentType.isBlank() && requestStream));
                 if(sse && response.statusCode()<300) {
                     exchange.getResponseHeaders().set("Content-Type","text/event-stream");
                     exchange.sendResponseHeaders(response.statusCode(),0);sent=true;
                     relaySse(input,exchange.getResponseBody());
                 } else {
                     byte[] reply=bounded(input);
-                    if(!search && response.statusCode()<300 && lastMime.contains("json")) policy.observe(json.readTree(reply));
+                    if(!standaloneTool && response.statusCode()<300 && lastMime.contains("json")) policy.observe(json.readTree(reply));
                     exchange.sendResponseHeaders(response.statusCode(),reply.length);sent=true;exchange.getResponseBody().write(reply);
                 }
             } finally {streams.remove(response.body());}

@@ -192,7 +192,9 @@ public class AppServerCodexAdapter implements CodexGateway {
         String identity=options.getModelRuntimeKey()+"\n"+target.provider()+"\n"+target.model()+"\n"+upstream+"\n"+accountIdentity;
         boolean standaloneSearch=!managed && ("openai".equals(target.provider())
                 || effective.path("model_providers").path(target.provider()).path("supports_standalone_web_search").asBoolean(false));
-        if(historyProxy==null) historyProxy=new ResponsesCompatibilityProxy(properties.getDataDir(),options.getWorkspace(),upstream,identity,objectMapper,standaloneSearch);
+        // Native image tools share openai_base_url with Responses, but use separate endpoints.
+        boolean imageGeneration=!managed && "openai".equals(target.provider());
+        if(historyProxy==null) historyProxy=new ResponsesCompatibilityProxy(properties.getDataDir(),options.getWorkspace(),upstream,identity,objectMapper,standaloneSearch,imageGeneration);
         else historyProxy.verifyIdentity(identity);
         config.withObject("features").put("responses_websockets",false).put("responses_websockets_v2",false);
         if(!managed && "openai".equals(target.provider())) {
