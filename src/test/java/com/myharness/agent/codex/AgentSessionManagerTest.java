@@ -135,13 +135,7 @@ class AgentSessionManagerTest {
 
     private com.myharness.agent.attachment.ConversationAttachmentService attachmentService() {
         var value=org.mockito.Mockito.mock(com.myharness.agent.attachment.ConversationAttachmentService.class);
-        org.mockito.Mockito.when(value.prepare(org.mockito.ArgumentMatchers.any(),org.mockito.ArgumentMatchers.any())).thenAnswer(invocation -> ((StartTurnCommandDTO)invocation.getArgument(0)).getMessage());
-        return value;
-    }
-
-    private com.myharness.agent.artifact.ConversationArtifactService artifactService() {
-        var value=org.mockito.Mockito.mock(com.myharness.agent.artifact.ConversationArtifactService.class);
-        org.mockito.Mockito.when(value.instructions(org.mockito.ArgumentMatchers.any())).thenReturn("");
+        org.mockito.Mockito.when(value.prepareInput(org.mockito.ArgumentMatchers.any(),org.mockito.ArgumentMatchers.any())).thenAnswer(invocation -> new com.myharness.agent.attachment.PreparedTurnAttachments(((StartTurnCommandDTO)invocation.getArgument(0)).getMessage(),List.of()));
         return value;
     }
 
@@ -160,7 +154,7 @@ class AgentSessionManagerTest {
         eventBus.subscribe(events::add);
         gateway = new FakeCodexGateway();
         registry = new WorkspaceRegistry(properties, new ObjectMapper());
-        manager = new AgentSessionManager(gateway, registry, eventBus, properties, attachmentService(), artifactService(), org.mockito.Mockito.mock(ExpertSkillPreparation.class));
+        manager = new AgentSessionManager(gateway, registry, eventBus, properties, attachmentService(), org.mockito.Mockito.mock(ExpertSkillPreparation.class));
     }
 
     @Test
@@ -230,7 +224,7 @@ class AgentSessionManagerTest {
         manager.startThread(thread("2"));
         manager.startTurn(turn("2", "2"));
         gateway.listener.onCompleted("codex-turn-1", "completed", null);
-        manager = new AgentSessionManager(gateway, registry, eventBus, properties, attachmentService(), artifactService(), org.mockito.Mockito.mock(ExpertSkillPreparation.class));
+        manager = new AgentSessionManager(gateway, registry, eventBus, properties, attachmentService(), org.mockito.Mockito.mock(ExpertSkillPreparation.class));
         events.clear();
 
         StartTurnCommandDTO followUp = recoverableTurn("2", "7");
@@ -314,11 +308,11 @@ class AgentSessionManagerTest {
 
     @Test void failedAttachmentPreparationNeverStartsCodexAndReleasesTurnSlot() {
         var files=org.mockito.Mockito.mock(com.myharness.agent.attachment.ConversationAttachmentService.class);
-        org.mockito.Mockito.when(files.prepare(org.mockito.ArgumentMatchers.any(),org.mockito.ArgumentMatchers.any()))
+        org.mockito.Mockito.when(files.prepareInput(org.mockito.ArgumentMatchers.any(),org.mockito.ArgumentMatchers.any()))
                 .thenThrow(new AgentOperationException("ATTACHMENT_PREPARATION_FAILED","bad checksum"));
-        manager=new AgentSessionManager(gateway,registry,eventBus,properties,files,artifactService(), org.mockito.Mockito.mock(ExpertSkillPreparation.class));
+        manager=new AgentSessionManager(gateway,registry,eventBus,properties,files, org.mockito.Mockito.mock(ExpertSkillPreparation.class));
         manager.startThread(thread("3"));
-        var command=turn("3","7");command.setAttachments(List.of(new com.myharness.agent.entity.dto.TurnAttachmentDTO("9","a.txt","text/plain",5,"abc")));
+        var command=turn("3","7");command.setAttachments(List.of(new com.myharness.agent.entity.dto.TurnAttachmentDTO("9","a.txt","text/plain",5,"abc","a.txt")));
         assertThrows(AgentOperationException.class,() -> manager.startTurn(command));
         org.junit.jupiter.api.Assertions.assertNull(gateway.startedTurnThreadId);
         assertEquals(0,manager.activeTurnCount());
@@ -329,13 +323,13 @@ class AgentSessionManagerTest {
         var started=new java.util.concurrent.CountDownLatch(1);
         var release=new java.util.concurrent.CountDownLatch(1);
         var files=org.mockito.Mockito.mock(com.myharness.agent.attachment.ConversationAttachmentService.class);
-        org.mockito.Mockito.when(files.prepare(org.mockito.ArgumentMatchers.any(),org.mockito.ArgumentMatchers.any())).thenAnswer(i -> {
+        org.mockito.Mockito.when(files.prepareInput(org.mockito.ArgumentMatchers.any(),org.mockito.ArgumentMatchers.any())).thenAnswer(i -> {
             started.countDown();
             try {release.await();} catch(InterruptedException e) {Thread.currentThread().interrupt();}
             ((com.myharness.agent.attachment.AttachmentPreparation)i.getArgument(1)).check();
-            return "prepared";
+            return new com.myharness.agent.attachment.PreparedTurnAttachments("prepared",List.of());
         });
-        manager=new AgentSessionManager(gateway,registry,eventBus,properties,files,artifactService(), org.mockito.Mockito.mock(ExpertSkillPreparation.class));manager.startThread(thread("3"));
+        manager=new AgentSessionManager(gateway,registry,eventBus,properties,files, org.mockito.Mockito.mock(ExpertSkillPreparation.class));manager.startThread(thread("3"));
         var executor=java.util.concurrent.Executors.newSingleThreadExecutor();
         try {
             var result=executor.submit(() -> manager.startTurn(turn("3","7")));
@@ -363,14 +357,12 @@ class AgentSessionManagerTest {
     }
 
     @Test void completesTurnWithoutLegacyArtifactCapture() {
-        var artifacts=artifactService();
         var expertPreparation=org.mockito.Mockito.mock(ExpertSkillPreparation.class);
-        manager=new AgentSessionManager(gateway,registry,eventBus,properties,attachmentService(),artifacts,expertPreparation);
+        manager=new AgentSessionManager(gateway,registry,eventBus,properties,attachmentService(),expertPreparation);
         manager.startThread(thread("3"));manager.startTurn(turn("3","7"));
         gateway.listener.onCompleted("codex-turn-1","completed",null);
         gateway.listener.onCompleted("codex-turn-1","completed",null);
         assertEquals(0,manager.activeTurnCount());
-        org.mockito.Mockito.verifyNoInteractions(artifacts);
         assertEquals("do work",gateway.lastInput.getMessage());
         
         assertEquals(AgentEventType.TURN_COMPLETED,events.getLast().getType());
@@ -379,7 +371,7 @@ class AgentSessionManagerTest {
         var expertPreparation=org.mockito.Mockito.mock(ExpertSkillPreparation.class);
         org.mockito.Mockito.when(expertPreparation.prepare(org.mockito.ArgumentMatchers.any(),org.mockito.ArgumentMatchers.any()))
                 .thenThrow(new CodexException("Skill preparation failed"));
-        manager=new AgentSessionManager(gateway,registry,eventBus,properties,attachmentService(),artifactService(),expertPreparation);
+        manager=new AgentSessionManager(gateway,registry,eventBus,properties,attachmentService(),expertPreparation);
         manager.startThread(thread("3"));
         assertThrows(CodexException.class,()->manager.startTurn(turn("3","7")));
         assertEquals(0,manager.activeTurnCount());

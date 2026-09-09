@@ -31,7 +31,6 @@ public class AgentSessionManager {
     private final ExpertSkillPreparation expertSkills;
     private final CodexGateway codexGateway;
     private final com.myharness.agent.attachment.ConversationAttachmentService attachments;
-    private final com.myharness.agent.artifact.ConversationArtifactService artifacts;
     private volatile boolean acceptingTurns=true;
     private final java.util.concurrent.atomic.AtomicLong connectionEpoch=new java.util.concurrent.atomic.AtomicLong();
     public void connected(){acceptingTurns=true;}
@@ -47,9 +46,9 @@ public class AgentSessionManager {
 
     public AgentSessionManager(CodexGateway codexGateway, WorkspaceRegistry workspaceRegistry,
                                AgentEventBus eventBus, AgentProperties properties, com.myharness.agent.attachment.ConversationAttachmentService attachments,
-                               com.myharness.agent.artifact.ConversationArtifactService artifacts, ExpertSkillPreparation expertSkills) {
+                               ExpertSkillPreparation expertSkills) {
         this.expertSkills=expertSkills;
-        this.codexGateway = codexGateway; this.attachments=attachments; this.artifacts=artifacts;
+        this.codexGateway = codexGateway; this.attachments=attachments;
         this.workspaceRegistry = workspaceRegistry;
         this.eventBus = eventBus;
         this.turnPermits = new Semaphore(properties.getMaxConcurrentTurns());
@@ -131,8 +130,6 @@ public class AgentSessionManager {
             CodexEventListener listener = listener(session, active);
             if(canceledTurns.contains(command.getTurnId()) || !acceptingTurns || connectionEpoch.get()!=epoch) active.preparation.cancel();
             var preparedAttachments=attachments.prepareInput(command,active.preparation);
-            if(preparedAttachments==null) preparedAttachments=new com.myharness.agent.attachment.PreparedTurnAttachments(
-                    attachments.prepare(command,active.preparation),java.util.List.of());
             String message=preparedAttachments.message();
             if(!preparedAttachments.localImages().isEmpty()&&command.getModelRuntime()!=null
                     &&!"LOCAL_CODEX".equals(command.getModelRuntime().getRuntimeMode())&&!command.getModelRuntime().supports("IMAGE"))

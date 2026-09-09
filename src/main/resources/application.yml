@@ -13,18 +13,12 @@ log:
 
 harness:
   agent:
-    artifacts:
-      max-file-bytes: 20971520
-      max-files: 5
-      max-total-bytes: 52428800
-      max-spool-bytes: 524288000
-      max-spool-files: 1000
     server-url: ws://localhost:9010/ws/agent
     enrollment-url: http://localhost:9010/api/v1/agent/enroll
     device-code:
     device-token:
-    enrollment-code: ENR-G8M3-2HNZ
-    device-name: local-device-1
+    enrollment-code: ENR-4ZCU-2VLG
+    device-name: jagger-device
     data-dir: ${project.folder}/.my-harness-agent
     skill-install-dir: ${project.folder}/.agents/skills
     max-concurrent-turns: 1

@@ -106,7 +106,7 @@ class CodexAppServerSmokeTest {
             var bus = new com.myharness.agent.connection.AgentEventBus();
             var events = new java.util.concurrent.CopyOnWriteArrayList<com.myharness.agent.connection.AgentEvent>();
             bus.subscribe(events::add);
-            var manager = new AgentSessionManager(adapter,registry,bus,properties, new com.myharness.agent.attachment.ConversationAttachmentService(properties,null,registry,new ObjectMapper()), org.mockito.Mockito.mock(com.myharness.agent.artifact.ConversationArtifactService.class), org.mockito.Mockito.mock(ExpertSkillPreparation.class));
+            var manager = new AgentSessionManager(adapter,registry,bus,properties, new com.myharness.agent.attachment.ConversationAttachmentService(properties,null,new ObjectMapper(),new com.myharness.agent.workspace.WorkspaceFileService(registry,properties,null,new ObjectMapper())), org.mockito.Mockito.mock(ExpertSkillPreparation.class));
             var turn = new com.myharness.agent.entity.dto.StartTurnCommandDTO();
             turn.setProjectId("empty-thread-smoke");turn.setWorkspaceName("empty");turn.setConversationId("1");
             turn.setTurnId("1");turn.setCodexThreadId(threadId);turn.setMessage("Reply exactly HARNESS_OK without using tools.");
