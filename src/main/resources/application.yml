@@ -5,7 +5,7 @@ spring:
     web-application-type: none
 
 project:
-  folder: D:/a_Coder/WorkSpace/webSer/myApps/agent-harness
+  folder: D:/a_Coder/WorkSpace/webSer/myApps/harness-agent
 
 log:
   root:
@@ -17,7 +17,7 @@ harness:
     enrollment-url: http://localhost:9010/api/v1/agent/enroll
     device-code:
     device-token:
-    enrollment-code: ENR-4ZCU-2VLG
+    enrollment-code: ENR-CEXG-EPUW
     device-name: jagger-device
     data-dir: ${project.folder}/.my-harness-agent
     skill-install-dir: ${project.folder}/.agents/skills
