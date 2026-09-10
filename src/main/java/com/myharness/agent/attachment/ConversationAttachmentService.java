@@ -34,6 +34,7 @@ public class ConversationAttachmentService {
         long total=0;
         for(TurnAttachmentDTO a:command.getAttachments()) {
             requireId(a.id());
+            if(a.workspaceLocationState()!=null&&!"AVAILABLE".equals(a.workspaceLocationState()))throw failure("工作区附件已删除或位置尚未确认，请重新选择文件");
             if(a.workspacePath()==null || a.workspacePath().isBlank() || a.fileName()==null || a.fileName().isBlank() || a.fileName().length()>255 || a.sizeBytes()<=0 || a.sizeBytes()>properties.getMaxAttachmentBytes() || a.sha256()==null || !a.sha256().matches("[a-f0-9]{64}")) throw failure("附件元数据无效");
             total=Math.addExact(total,a.sizeBytes());
             if(total>properties.getMaxTurnAttachmentBytes()) throw failure("附件总大小超过 Agent 限制");

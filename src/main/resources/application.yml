@@ -22,6 +22,9 @@ harness:
     data-dir: ${project.folder}/.my-harness-agent
     skill-install-dir: ${project.folder}/.agents/skills
     max-concurrent-turns: 1
+    workspace-archive-max-files: 100
+    workspace-archive-max-total-bytes: 104857600
+    workspace-archive-max-output-bytes: 115343360
     heartbeat-interval-seconds: 15
     reconnect-max-delay-seconds: 30
     command-deduplication-size: 1000

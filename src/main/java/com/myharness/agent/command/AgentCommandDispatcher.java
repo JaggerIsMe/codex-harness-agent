@@ -57,7 +57,8 @@ public class AgentCommandDispatcher {
     }
 
     public void handle(ProtocolEnvelope envelope) {
-        if(java.util.Set.of("SYNC_WORKSPACE_TREE","CREATE_WORKSPACE_DIRECTORY","UPLOAD_WORKSPACE_FILE","PREPARE_WORKSPACE_DOWNLOAD").contains(envelope.getType())) {
+        if(java.util.Set.of("SYNC_WORKSPACE_TREE","CREATE_WORKSPACE_DIRECTORY","UPLOAD_WORKSPACE_FILE","PREPARE_WORKSPACE_DOWNLOAD",
+                "RELOCATE_WORKSPACE_ENTRY","PREPARE_WORKSPACE_DELETE","DELETE_WORKSPACE_ENTRY","PREPARE_WORKSPACE_ARCHIVE","RECONCILE_WORKSPACE_OPERATION").contains(envelope.getType())) {
             try {fileExecutor.execute(() -> handleNow(envelope));}
             catch(java.util.concurrent.RejectedExecutionException e) {
                 for(AgentEvent result:error(envelope,"AGENT_BUSY","文件操作队列已满")) eventBus.publish(result);
@@ -87,6 +88,11 @@ public class AgentCommandDispatcher {
                 case CREATE_WORKSPACE_DIRECTORY:
                 case UPLOAD_WORKSPACE_FILE:
                 case PREPARE_WORKSPACE_DOWNLOAD:
+                case RELOCATE_WORKSPACE_ENTRY:
+                case PREPARE_WORKSPACE_DELETE:
+                case DELETE_WORKSPACE_ENTRY:
+                case PREPARE_WORKSPACE_ARCHIVE:
+                case RECONCILE_WORKSPACE_OPERATION:
                     return one(new AgentEvent(AgentEventType.WORKSPACE_FILE_RESULT,envelope.getCorrelationId(),
                             workspaceFiles.execute(type.name(),codec.payload(envelope,com.myharness.agent.entity.dto.WorkspaceFileCommandDTO.class))));
                 case START_THREAD:

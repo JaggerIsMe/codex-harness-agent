@@ -28,6 +28,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 @Component
 public class AgentSessionManager {
+    private com.myharness.agent.workspace.WorkspaceExecutionCoordinator workspaceExecution=new com.myharness.agent.workspace.WorkspaceExecutionCoordinator();
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setWorkspaceExecution(com.myharness.agent.workspace.WorkspaceExecutionCoordinator value){workspaceExecution=value;}
     private final ExpertSkillPreparation expertSkills;
     private final CodexGateway codexGateway;
     private final com.myharness.agent.attachment.ConversationAttachmentService attachments;
@@ -108,17 +111,23 @@ public class AgentSessionManager {
             throw new AgentOperationException("AGENT_BUSY", "Agent has reached its concurrent Turn limit");
         }
         final SessionContext session;
+        com.myharness.agent.workspace.WorkspaceExecutionCoordinator.Lease workspaceLease=null;
         try {
+            Path root=command.getWorkspaceName()==null?session(command.getConversationId()).workspace:workspaceRegistry.resolve(command.getWorkspaceName(),"");
+            workspaceLease=workspaceExecution.enterTurn(root);
             session = sessionForTurn(command);
         } catch (RuntimeException exception) {
+            if(workspaceLease!=null)workspaceLease.close();
             turnPermits.release();
             throw exception;
         }
 
         ActiveTurn active = new ActiveTurn(command.getTurnId());
+        active.workspaceLease=workspaceLease;
         active.runner=Thread.currentThread();
         synchronized (session) {
             if (session.activeTurn != null) {
+                workspaceLease.close();
                 turnPermits.release();
                 throw new AgentOperationException("TURN_ALREADY_RUNNING",
                         "Conversation already has an active Turn: " + command.getConversationId());
@@ -154,7 +163,7 @@ public class AgentSessionManager {
             active.runner=null;
             if(active.preparation.canceled()) {
                 codexGateway.interruptTurn(session.codexThreadId,codexTurnId);
-                finish(session,active);
+                // An interrupt acknowledgement does not prove execution has stopped. The terminal callback releases the lease.
                 return new AgentEvent(AgentEventType.TURN_INTERRUPTED,command.getTurnId(),
                         new TurnTerminalEventDTO(command.getConversationId(),command.getTurnId(),codexTurnId,"已取消",active.eventSeq));
             }
@@ -167,7 +176,16 @@ public class AgentSessionManager {
                             "attachment-preparation-error",exception.getMessage(),null,null));
                 }
             } catch(RuntimeException publishFailure) {exception.addSuppressed(publishFailure);}
-            finally {finish(session, active);}
+            finally {
+                active.runner=null;
+                boolean stopped=true;
+                if(active.launching&&!active.finished.get()) {
+                    // A failed start RPC may have reached Codex. Kill the owned execution before releasing its Workspace.
+                    try {codexGateway.closeThread(session.codexThreadId);}
+                    catch(RuntimeException stopFailure){stopped=false;exception.addSuppressed(stopFailure);}
+                }
+                if(stopped)finish(session,active);
+            }
             if(active.preparation.canceled()) {
                 Thread.interrupted();
                 return new AgentEvent(AgentEventType.TURN_INTERRUPTED,command.getTurnId(),
@@ -229,6 +247,13 @@ public class AgentSessionManager {
                     active.preparation.cancel();
                     if(active.codexTurnId==null) {
                         if(active.runner!=null && !active.launching) active.runner.interrupt();
+                        if(active.runner==null && active.launching) {
+                            try {
+                                codexGateway.closeThread(session.codexThreadId);
+                                if(finish(session,active))eventBus.publish(new AgentEvent(AgentEventType.TURN_INTERRUPTED,active.harnessTurnId,
+                                        new TurnTerminalEventDTO(session.conversationId,active.harnessTurnId,null,"启动结果未知的执行已停止",active.eventSeq)));
+                            }catch(RuntimeException ignored){ /* Retain the Workspace lease until owned execution stops. */ }
+                        }
                         continue;
                     }
                 }
@@ -243,8 +268,13 @@ public class AgentSessionManager {
                     reason = "Connection was lost and the active Turn could not be interrupted";
                 }
                 synchronized (active) {
-                    if (finish(session, active)) {
+                    try {
                         codexGateway.closeThread(session.codexThreadId);
+                    } catch(RuntimeException stopFailure) {
+                        // Keep this workspace occupied if an owned process could still be running.
+                        continue;
+                    }
+                    if (finish(session, active)) {
                         eventBus.publish(new AgentEvent(terminalType, active.harnessTurnId,
                                 new TurnTerminalEventDTO(session.conversationId, active.harnessTurnId,
                                         active.codexTurnId, reason, active.eventSeq)));
@@ -306,6 +336,7 @@ public class AgentSessionManager {
             }
         }
         turnPermits.release();
+        if(active.workspaceLease!=null)active.workspaceLease.close();
         return true;
     }
 
@@ -513,6 +544,7 @@ public class AgentSessionManager {
     }
 
     private static final class ActiveTurn {
+        private com.myharness.agent.workspace.WorkspaceExecutionCoordinator.Lease workspaceLease;
         private final com.myharness.agent.attachment.AttachmentPreparation preparation=new com.myharness.agent.attachment.AttachmentPreparation();
         private volatile Thread runner;
         private volatile boolean launching;

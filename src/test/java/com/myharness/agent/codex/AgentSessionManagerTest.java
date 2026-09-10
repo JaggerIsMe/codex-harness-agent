@@ -377,8 +377,10 @@ class AgentSessionManagerTest {
         assertEquals(0,manager.activeTurnCount());
     }
     private static final class FakeCodexGateway implements CodexGateway {
+        private boolean failStart;
+        private boolean failClose;
         private final List<String> closedThreads=new ArrayList<>();
-        @Override public void closeThread(String id) {closedThreads.add(id);}
+        @Override public void closeThread(String id) {if(failClose)throw new CodexException("still executing");closedThreads.add(id);}
         private int threadSequence;
         private CodexEventListener listener;
         private String interruptedThreadId;
@@ -405,6 +407,7 @@ class AgentSessionManagerTest {
 
         @Override
         public String startTurn(String threadId, CodexTurnInput input, CodexEventListener listener) {
+            if(failStart)throw new CodexException("start acknowledgement timed out");
             lastInput=input;
             startedTurnThreadId = threadId;
             this.listener = listener;
@@ -425,5 +428,33 @@ class AgentSessionManagerTest {
         public void close() {
         }
         private CodexTurnInput lastInput;
+    }
+
+    @Test void workspaceMutationWaitsForActualTerminalAfterInterruptAcknowledgement() {
+        var coordinator=new com.myharness.agent.workspace.WorkspaceExecutionCoordinator();manager.setWorkspaceExecution(coordinator);
+        Path root=registry.resolve("demo","");manager.startThread(thread("3"));manager.startTurn(turn("3","7"));
+        var interrupt=new InterruptTurnCommandDTO();interrupt.setConversationId("3");interrupt.setTurnId("7");manager.interruptTurn(interrupt);
+        assertEquals("WORKSPACE_BUSY",assertThrows(AgentOperationException.class,()->coordinator.enterMutation(root,"delete-1")).getErrorCode());
+        gateway.listener.onCompleted("codex-turn-1","interrupted",null);
+        try(var mutation=coordinator.enterMutation(root,"delete-1")) {
+            assertEquals("WORKSPACE_BUSY",assertThrows(AgentOperationException.class,()->manager.startTurn(turn("3","8"))).getErrorCode());
+        }
+        manager.startTurn(turn("3","8"));assertEquals(1,manager.activeTurnCount());
+    }
+    @Test void disconnectDoesNotReleaseWorkspaceWhenOwnedExecutionCannotBeStopped() {
+        var coordinator=new com.myharness.agent.workspace.WorkspaceExecutionCoordinator();manager.setWorkspaceExecution(coordinator);
+        Path root=registry.resolve("demo","");manager.startThread(thread("3"));manager.startTurn(turn("3","7"));
+        gateway.failClose=true;manager.interruptAll();
+        assertThrows(AgentOperationException.class,()->coordinator.enterMutation(root,"delete-1"));assertEquals(1,manager.activeTurnCount());
+        gateway.failClose=false;manager.interruptAll();
+        try(var mutation=coordinator.enterMutation(root,"delete-1")){assertEquals(0,manager.activeTurnCount());}
+    }
+    @Test void ambiguousStartFailureKeepsWorkspaceOccupiedUntilExecutionStopIsConfirmed() {
+        var coordinator=new com.myharness.agent.workspace.WorkspaceExecutionCoordinator();manager.setWorkspaceExecution(coordinator);
+        Path root=registry.resolve("demo","");manager.startThread(thread("3"));gateway.failStart=true;gateway.failClose=true;
+        assertThrows(CodexException.class,()->manager.startTurn(turn("3","7")));
+        assertThrows(AgentOperationException.class,()->coordinator.enterMutation(root,"delete-1"));assertEquals(1,manager.activeTurnCount());
+        gateway.failClose=false;manager.interruptAll();
+        try(var mutation=coordinator.enterMutation(root,"delete-1")){assertEquals(0,manager.activeTurnCount());}
     }
 }

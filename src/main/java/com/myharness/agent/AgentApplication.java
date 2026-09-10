@@ -12,6 +12,7 @@ import java.util.concurrent.CountDownLatch;
 
 @EnableConfigurationProperties(AgentProperties.class)
 @SpringBootApplication
+@org.springframework.scheduling.annotation.EnableScheduling
 public class AgentApplication {
 
     public static void main(String[] args) {

@@ -12,6 +12,9 @@ public class RegisterEventDTO {
     private final String isolationMode;
     private final List<WorkspaceVO> workspaces;
     private final List<WorkspaceRootVO> workspaceRoots;
+    private WorkspaceFileLimitsDTO workspaceFileLimits;
+    public WorkspaceFileLimitsDTO getWorkspaceFileLimits(){return workspaceFileLimits;}
+    public RegisterEventDTO withWorkspaceFileLimits(WorkspaceFileLimitsDTO value){workspaceFileLimits=value;return this;}
 
     public RegisterEventDTO(String deviceName, String agentVersion, String osName, String osVersion,String isolationMode,
                             List<WorkspaceVO> workspaces, List<WorkspaceRootVO> workspaceRoots) {
@@ -24,7 +27,11 @@ public class RegisterEventDTO {
         this.workspaceRoots = workspaceRoots;
     }
 
-    public java.util.List<String> getCapabilities(){return java.util.List.of("WORKSPACE_FILES_V1","CONVERSATION_ATTACHMENTS_V1","CONVERSATION_EXPERTS_V4","MANAGED_MODEL_PROVIDERS_V1","MODEL_RUNTIME_TARGETS_V2");}
+    public java.util.List<String> getCapabilities(){
+        var values=new java.util.ArrayList<>(java.util.List.of("WORKSPACE_FILES_V1","WORKSPACE_ARCHIVE_DOWNLOAD_V1","CONVERSATION_ATTACHMENTS_V1","CONVERSATION_EXPERTS_V4","MANAGED_MODEL_PROVIDERS_V1","MODEL_RUNTIME_TARGETS_V2"));
+        if(com.sun.jna.Platform.isWindows())values.add("WORKSPACE_FILE_MUTATIONS_V1");
+        return java.util.List.copyOf(values);
+    }
     public String getDeviceName() { return deviceName; }
     public String getAgentVersion() { return agentVersion; }
     public String getOsName() { return osName; }

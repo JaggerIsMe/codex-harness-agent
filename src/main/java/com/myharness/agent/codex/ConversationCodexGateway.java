@@ -102,8 +102,11 @@ public class ConversationCodexGateway implements CodexGateway {
         route.entry.gateway.resolveApproval(route.nativeId,decision);
     }
     @Override public synchronized void closeThread(String id) {
-        Entry entry=threads.remove(id);
-        if(entry!=null) {approvals.entrySet().removeIf(value->value.getValue().entry==entry);entry.gateway.close();}
+        Entry entry=threads.get(id);
+        if(entry!=null) {
+            entry.gateway.close();
+            threads.remove(id,entry);approvals.entrySet().removeIf(value->value.getValue().entry==entry);
+        }
     }
     synchronized void reapIdle(long now,long timeout) {
         for(var item:List.copyOf(threads.entrySet())) {

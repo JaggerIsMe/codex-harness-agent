@@ -17,6 +17,23 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class AppServerProcessLifecycleTest {
+    @Test void failedStopRetainsDescendantsAfterTheirLauncherHasExited() throws Exception {
+        var wrapper=org.mockito.Mockito.mock(Process.class);var parent=org.mockito.Mockito.mock(ProcessHandle.class);var child=org.mockito.Mockito.mock(ProcessHandle.class);
+        org.mockito.Mockito.when(wrapper.toHandle()).thenReturn(parent);
+        org.mockito.Mockito.when(wrapper.descendants()).thenAnswer(ignored->java.util.stream.Stream.of(child));
+        org.mockito.Mockito.when(wrapper.getOutputStream()).thenReturn(java.io.OutputStream.nullOutputStream());
+        org.mockito.Mockito.when(parent.onExit()).thenReturn(CompletableFuture.completedFuture(parent));
+        org.mockito.Mockito.when(child.onExit()).thenReturn(CompletableFuture.completedFuture(child));
+        org.mockito.Mockito.when(child.isAlive()).thenReturn(true);
+        var adapter=new AppServerCodexAdapter(new AgentProperties(),new ObjectMapper());ReflectionTestUtils.setField(adapter,"process",wrapper);
+        org.junit.jupiter.api.Assertions.assertThrows(CodexException.class,adapter::close);
+        assertThat(ReflectionTestUtils.getField(adapter,"process")).isSameAs(wrapper);
+        org.mockito.Mockito.when(wrapper.descendants()).thenAnswer(ignored->java.util.stream.Stream.empty());
+        org.junit.jupiter.api.Assertions.assertThrows(CodexException.class,adapter::close);
+        org.mockito.Mockito.verify(child,org.mockito.Mockito.times(2)).destroyForcibly();
+        org.mockito.Mockito.when(child.isAlive()).thenReturn(false);adapter.close();
+        assertThat(ReflectionTestUtils.getField(adapter,"process")).isNull();
+    }
     @Test
     void closeWaitsForDescendantsEvenWhenLauncherExitsOnStdinEof() throws Exception {
         Process wrapper = fixture("wrapper").start();

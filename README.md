@@ -20,6 +20,8 @@ Harness Agent 运行在目标电脑上，通过主动 WSS 连接接受 Harness S
 - 在预授权父目录内原子创建动态工作区，并持久化到 `${harness.agent.data-dir}/workspaces.json` 以支持重启恢复和请求幂等。
 - Skill 同源鉴权下载、SHA-256 校验、Zip Slip/链接/特殊文件拦截、展开限制；全局 Skill 原子安装到 `${harness.agent.skill-install-dir}`（默认 `${user.home}/.agents/skills`），项目级 Skill 安装到工作区 `.agents/skills`。
 
+受管 Expert 的新建与恢复线程均设置 `features.apps=false`、`features.plugins=false`，防止本机安装的插件向会话注入额外 MCP Server。专家快照中授权的 MCP 配置和 Skill 继续显式加载，线程建立后仍执行 MCP 白名单检查。此设置只作用于 Harness 线程，不修改用户 Codex 配置或卸载插件。更新 Agent 后需重启 Agent，再在原 Conversation 中重试失败的请求。
+
 中台对接协议见 [Harness Agent API 文档](../../docs/harness-agent-api.md)，HTTP 接口定义见 [OpenAPI](../../docs/harness-agent-openapi.yaml)。
 
 ## 前置条件
@@ -92,6 +94,14 @@ harness:
 新文件通过项目工作区目录树上传和下载，对话框附件默认上传到工作区根目录。Agent 不再注入输出清单约定，也不再扫描 manifest 或收集 Turn 产物快照。接口、限制和升级步骤见 [Workspace 文件方案](../../docs/workspace-files.md)。
 
 旧 Artifact 补传队列和配置已移除；消息附件只校验并读取 Workspace 文件，不再从平台下载到隐藏附件目录。升级后的旧队列清理步骤见 [Workspace 文件方案](../../docs/workspace-files.md)。
+
+工作区文件操作 V1 增加重命名、单文件移动、检查后删除和多选 ZIP。Agent 的 Windows 实现使用 JNA 的句柄操作：禁止覆盖目标、固定父目录与源对象，并用卷身份和完整 128 位文件 ID 生成 `entryRevision`。没有安全句柄支持的平台不声明 `WORKSPACE_FILE_MUTATIONS_V1`；文件系统不能提供可靠身份时明确拒绝。ZIP 使用 `WORKSPACE_ARCHIVE_DOWNLOAD_V1`，Windows 以固定路径句柄读取，其他平台要求 `SecureDirectoryStream`。
+
+所有层级的 `.codex`、`.git`、`.harness`、`.agent`、`.agents`、`.harness-workspace.json` 和 `.harness-upload-` 临时前缀统一隐藏并保护。目录重命名完整复核子树，目录删除按确认清单逐项执行；平台管理的 Turn 与变更互斥，收到中断确认后仍等实际执行结束再释放。操作无法确认或进程不能确认停止时保留占用，禁止自动重试变更。此协调不锁住外部程序新建文件，目录重命名不承诺外部写入的原子子树快照。
+
+本机 ZIP 默认最多 100 个普通文件、源合计 100 MiB、输出 110 MiB，单个源沿用 `max-attachment-bytes`（20 MiB）。对应配置为 `workspace-archive-max-files`、`workspace-archive-max-total-bytes`、`workspace-archive-max-output-bytes`；Server 取两端较小限额。ZIP 保留 UTF-8 工作区相对路径，条目 comment 保存源 SHA-256，整个 ZIP 通过 SHA-256 传输校验。
+
+删除计划放在 Agent 数据目录 `workspace-delete-plans`，有效 120 秒且不跨重启；临时计划和过期传输字节每分钟进行有界清理，传输残留保留最多约 24 小时。`workspace-action-journal` 保存请求摘要和结果，不可通过删除该目录来解除 UNKNOWN；核实命令只重放已持久化结果，绝不再次执行文件修改。详细协议见 [文件操作扩展方案](../../docs/workspace-file-actions.md)。
 
 ## 验证与启动
 

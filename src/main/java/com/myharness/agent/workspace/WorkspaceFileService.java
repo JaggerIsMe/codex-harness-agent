@@ -19,15 +19,30 @@ import java.util.*;
 @Component
 public class WorkspaceFileService {
     private static final int PAGE_SIZE = 200;
-    private static final Set<String> HIDDEN_NAMES = Set.of(".codex", ".git", ".harness", ".agent", ".agents", ".harness-workspace.json");
     private final WorkspaceRegistry workspaces;
     private final AgentProperties properties;
     private final DeviceIdentityProvider identity;
     private final ObjectMapper json;
+    private final WorkspacePathPolicy paths;
+    private final WorkspaceExecutionCoordinator coordination;
+    private final WorkspaceFileActions actions;
+    @org.springframework.scheduling.annotation.Scheduled(fixedDelay=60000)
+    public void cleanupActionTemporaryFiles() {
+        try{actions.cleanup();}catch(IOException ignored){ /* Retry on the next bounded sweep. */ }
+    }
 
     public WorkspaceFileService(WorkspaceRegistry workspaces, AgentProperties properties,
                                 DeviceIdentityProvider identity, ObjectMapper json) {
+        this(workspaces,properties,identity,json,new WorkspaceExecutionCoordinator());
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public WorkspaceFileService(WorkspaceRegistry workspaces, AgentProperties properties,
+                                DeviceIdentityProvider identity, ObjectMapper json,WorkspaceExecutionCoordinator coordination) {
         this.workspaces=workspaces; this.properties=properties; this.identity=identity; this.json=json;
+        this.paths=new WorkspacePathPolicy(workspaces);this.coordination=coordination;
+        try {this.actions=new WorkspaceFileActions(paths,properties,json,coordination,this::uploadBytes);}
+        catch(IOException e){throw new IllegalStateException("无法恢复工作区文件操作日志",e);}
     }
 
     public WorkspaceFileResultDTO execute(String kind, WorkspaceFileCommandDTO command) {
@@ -35,35 +50,28 @@ public class WorkspaceFileService {
             if (command==null || command.operationId()==null || !command.operationId().matches("[1-9][0-9]{0,18}"))
                 throw new IOException("操作标识无效");
             authorize(command);
-            return switch(kind) {
+            if(WorkspaceFileActions.handles(kind))return actions.execute(kind,command);
+            try(var lease=coordination.enterRead(paths.checked(command.workspaceName(),""))) {return switch(kind) {
                 case "SYNC_WORKSPACE_TREE" -> list(command);
                 case "CREATE_WORKSPACE_DIRECTORY" -> create(command);
                 case "UPLOAD_WORKSPACE_FILE" -> upload(command);
                 case "PREPARE_WORKSPACE_DOWNLOAD" -> download(command);
                 default -> throw new IOException("不支持的文件操作");
-            };
+            };}
         } catch(Exception error) {
+            if(WorkspaceFileActions.handles(kind)) {
+                boolean reconcile="RECONCILE_WORKSPACE_OPERATION".equals(kind);
+                return new WorkspaceFileResultDTO(command==null?null:command.operationId(),false,"文件操作参数或授权校验失败",List.of(),null,0,0,null,
+                        1,reconcile?"UNKNOWN":"FAILED",reconcile?"UNKNOWN":"NO_CHANGE","AUTHORIZATION_FAILED",command==null?null:command.path(),
+                        command==null?null:command.targetPath(),null,null,null,null,null,null);
+            }
             return new WorkspaceFileResultDTO(command==null ? null : command.operationId(),false,
                     error.getMessage()==null ? "文件操作失败" : error.getMessage(),List.of(),null,0,0,null);
         }
     }
 
     public Path checkedPath(String workspace, String relative, boolean write) throws IOException {
-        validateRelative(relative);
-        Path root=workspaces.resolve(workspace,"").toRealPath();
-        Path target=root;
-        if (!relative.isEmpty()) for(String segment:relative.split("/")) {
-            if (write && Set.of(".git",".codex",".agents",".harness",".harness-workspace.json").contains(segment.toLowerCase(Locale.ROOT)))
-                throw new IOException("不能修改受保护的工作区路径");
-            target=target.resolve(segment);
-            if (Files.exists(target,LinkOption.NOFOLLOW_LINKS)) {
-                if (Files.isSymbolicLink(target) || !target.equals(target.toRealPath()))
-                    throw new IOException("不支持链接或重解析路径");
-            }
-        }
-        if (!target.startsWith(root) || !target.equals(workspaces.resolve(workspace,relative)))
-            throw new IOException("路径超出工作区");
-        return target;
+        return paths.checked(workspace,relative);
     }
 
     public static void validateRelative(String path) throws IOException {
@@ -99,25 +107,22 @@ public class WorkspaceFileService {
         for(Path p:paths.subList(0,Math.min(PAGE_SIZE,paths.size()))) {
             String name=p.getFileName().toString();
             String relative=c.path().isEmpty() ? name : c.path()+"/"+name;
-            String type="UNAVAILABLE"; long size=0,modified=0;
+            String type="UNAVAILABLE",revision=null; long size=0,modified=0;
             try {
                 Path safe=checkedPath(c.workspaceName(),relative,false);
                 BasicFileAttributes a=Files.readAttributes(safe,BasicFileAttributes.class,LinkOption.NOFOLLOW_LINKS);
                 type=a.isDirectory() ? "DIRECTORY" : a.isRegularFile() ? "FILE" : "UNAVAILABLE";
                 size=a.isRegularFile() ? a.size() : 0; modified=a.lastModifiedTime().toMillis();
+                if(!"UNAVAILABLE".equals(type))revision=this.paths.revision(c.workspaceName(),relative);
             } catch(IOException|RuntimeException ignored) { /* Keep unreadable entries visible without following links. */ }
-            entries.add(new WorkspaceFileEntryVO(name,relative,type,size,modified));
+            entries.add(new WorkspaceFileEntryVO(name,relative,type,size,modified,revision));
         }
         return new WorkspaceFileResultDTO(c.operationId(),true,null,List.copyOf(entries),
                 paths.size()>PAGE_SIZE ? paths.get(PAGE_SIZE-1).getFileName().toString() : null,System.currentTimeMillis(),0,null);
     }
 
     private static boolean visiblePath(String path) {
-        for (String part : path.split("/")) {
-            String name = part.toLowerCase(Locale.ROOT);
-            if (HIDDEN_NAMES.contains(name) || name.startsWith(".harness-upload-")) return false;
-        }
-        return true;
+        return WorkspacePathPolicy.visible(path);
     }
 
     private WorkspaceFileResultDTO create(WorkspaceFileCommandDTO c) throws IOException {
@@ -161,8 +166,11 @@ public class WorkspaceFileService {
         Path temporary=Files.createTempFile(spool,"download-",".part");
         try {
             String hash;
-            try(var input=Files.newInputStream(target,LinkOption.NOFOLLOW_LINKS);var output=Files.newOutputStream(temporary)) {
-                hash=copy(input,output,before.size(),true);
+            String revision=paths.revision(c.workspaceName(),c.path());
+            try(var reader=WorkspaceReadHandle.open(paths.checked(c.workspaceName(),""),target);var output=Files.newOutputStream(temporary)) {
+                paths.expected(c.workspaceName(),c.path(),revision);
+                hash=copy(reader.input(),output,before.size(),true);
+                paths.expected(c.workspaceName(),c.path(),revision);
             }
             BasicFileAttributes after=Files.readAttributes(checkedPath(c.workspaceName(),c.path(),false),BasicFileAttributes.class,LinkOption.NOFOLLOW_LINKS);
             if (!before.lastModifiedTime().equals(after.lastModifiedTime()) || before.size()!=after.size() || !Objects.equals(before.fileKey(),after.fileKey()))
@@ -184,10 +192,10 @@ public class WorkspaceFileService {
         try {
             requireOk(connection);
             try(var input=connection.getInputStream()) {
-                byte[] data=input.readNBytes(32769);
-                if(data.length>32768) throw new IOException("文件操作授权响应超限");
+                byte[] data=input.readNBytes(512*1024+1);
+                if(data.length>512*1024) throw new IOException("文件操作授权响应超限");
                 var response=json.readTree(data);
-                if (!"success".equals(response.path("status").asText()) || !c.equals(json.treeToValue(response.path("data"),WorkspaceFileCommandDTO.class)))
+                if (!"success".equals(response.path("status").asText()) || !c.original().equals(json.treeToValue(response.path("data"),WorkspaceFileCommandDTO.class).original()))
                     throw new IOException("文件操作已失效或授权不匹配");
             }
         } finally {connection.disconnect();}
@@ -217,7 +225,7 @@ public class WorkspaceFileService {
     private static void requireOk(HttpURLConnection connection) throws IOException {
         if(connection.getResponseCode()!=200) throw new IOException("文件传输或授权失败，HTTP "+connection.getResponseCode());
     }
-    private static String copy(InputStream input,OutputStream output,long limit,boolean exact) throws IOException {
+    static String copy(InputStream input,OutputStream output,long limit,boolean exact) throws IOException {
         MessageDigest digest;
         try {digest=MessageDigest.getInstance("SHA-256");} catch(Exception e) {throw new IllegalStateException(e);}
         byte[] buffer=new byte[8192]; long total=0; int n;
@@ -231,5 +239,16 @@ public class WorkspaceFileService {
     }
     private WorkspaceFileResultDTO success(WorkspaceFileCommandDTO c,long size,String sha) {
         return new WorkspaceFileResultDTO(c.operationId(),true,null,List.of(),null,0,size,sha);
+    }
+    private void uploadBytes(WorkspaceFileCommandDTO c,String suffix,Path file,String sha) throws IOException {
+        authorize(c);
+        HttpURLConnection connection=open(c,suffix,"PUT");long size=Files.size(file);
+        connection.setDoOutput(true);connection.setFixedLengthStreamingMode(size);
+        connection.setRequestProperty("Content-Type","/items".equals(suffix)?"application/json":"application/octet-stream");
+        connection.setRequestProperty("X-Content-SHA256",sha);
+        try {
+            try(var input=Files.newInputStream(file);var output=connection.getOutputStream()){copy(input,output,size,true);}
+            requireOk(connection);
+        }finally{connection.disconnect();}
     }
 }

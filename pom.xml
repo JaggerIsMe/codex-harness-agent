@@ -26,6 +26,11 @@
 
     <dependencies>
         <dependency>
+            <groupId>net.java.dev.jna</groupId>
+            <artifactId>jna-platform</artifactId>
+            <version>5.17.0</version>
+        </dependency>
+        <dependency>
             <groupId>com.github.luben</groupId>
             <artifactId>zstd-jni</artifactId>
             <version>1.5.7-6</version>

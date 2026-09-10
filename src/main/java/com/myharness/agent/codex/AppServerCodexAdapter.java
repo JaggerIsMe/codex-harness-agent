@@ -387,7 +387,9 @@ public class AppServerCodexAdapter implements CodexGateway {
         if(!options.isIsolatedExpertRuntime()) return;
         JsonNode raw=params.get("config");
         ObjectNode config=raw instanceof ObjectNode object ? object : params.putObject("config");
-        config.withObject("features").put("apps",false);
+        // Plugin MCP discovery is separate from the initial mcpServerStatus inventory.
+        // Only the Expert's explicitly supplied skills and MCP runtimes belong to this thread.
+        config.withObject("features").put("apps",false).put("plugins",false);
         if(!options.getMcpServers().isEmpty()) {
             // Harness, rather than Codex auto-review, owns the user-facing Approval Request flow.
             config.put("approvals_reviewer","user");
@@ -899,12 +901,12 @@ public class AppServerCodexAdapter implements CodexGateway {
 
     @Override
     @PreDestroy
-    public void close() {
+    public synchronized void close() {
         closing = true;
         Process current = process;
-        process = null;
         writer = null;
         stopProcessTree(current);
+        process = null;
         if(historyProxy!=null) {historyProxy.close();historyProxy=null;}
         CodexException closed = new CodexException("Codex App Server was stopped");
         for (CompletableFuture<JsonNode> future : pendingRequests.values()) {
@@ -919,21 +921,26 @@ public class AppServerCodexAdapter implements CodexGateway {
         threadModels.clear();
     }
 
+    private List<ProcessHandle> stoppingProcesses=List.of();
     private void stopProcessTree(Process current) {
-        if (current == null) {
+        if (current == null && stoppingProcesses.isEmpty()) {
             return;
         }
         // Capture ownership before the wrapper exits; Windows .cmd launchers have multiple descendants.
-        List<ProcessHandle> owned = new ArrayList<>(current.descendants().toList());
-        owned.add(current.toHandle());
+        List<ProcessHandle> owned = new ArrayList<>(stoppingProcesses);
+        if(current!=null) {
+            for(ProcessHandle child:current.descendants().toList())if(!owned.contains(child))owned.add(child);
+            if(!owned.contains(current.toHandle()))owned.add(current.toHandle());
+        }
+        stoppingProcesses=List.copyOf(owned);
         boolean interrupted = false;
         try {
             try {
-                current.getOutputStream().close();
+                if(current!=null)current.getOutputStream().close();
             } catch (IOException ignored) {
                 // Already closed after startup failure or a remote exit.
             }
-            current.waitFor(3, TimeUnit.SECONDS);
+            if(current!=null)current.waitFor(3, TimeUnit.SECONDS);
         } catch (InterruptedException exception) {
             interrupted = true;
         } finally {
@@ -956,6 +963,9 @@ public class AppServerCodexAdapter implements CodexGateway {
                 Thread.currentThread().interrupt();
             }
         }
+        if(owned.stream().anyMatch(ProcessHandle::isAlive))
+            throw new CodexException("Owned Codex processes have not confirmed termination");
+        stoppingProcesses=List.of();
     }
 
     private String toCodexDecision(ApprovalDecision decision) {

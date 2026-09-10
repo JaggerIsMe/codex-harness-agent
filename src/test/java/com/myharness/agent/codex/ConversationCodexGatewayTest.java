@@ -83,9 +83,18 @@ class ConversationCodexGatewayTest {
         var value=new com.myharness.agent.entity.dto.McpRuntimeDTO();value.setConfigurationVersionId(version);
         value.setConfigDigest(digest);value.setServerCode("github");return value;
     }
+    @Test void failedProcessCloseRetainsTheOwnedRuntimeForAnotherStopAttempt() {
+        try(var gateway=gateway()) {
+            String id=gateway.startThread(options("a"));Fake process=processes.getFirst();process.failClose=true;
+            assertThrows(CodexException.class,()->gateway.closeThread(id));
+            gateway.interruptTurn(id,"turn");assertEquals("turn",process.interrupted);
+            process.failClose=false;gateway.closeThread(id);assertTrue(process.closed);
+            assertThrows(CodexException.class,()->gateway.interruptTurn(id,"turn"));
+        }
+    }
     static final class Fake implements CodexGateway {
         final String id;CodexThreadOptions options;CodexTurnInput input;CodexEventListener listener;
-        String resolved,resumed,interrupted;boolean closed,available=true;
+        String resolved,resumed,interrupted;boolean closed,available=true,failClose;
         Fake(String id) {this.id=id;}
         public String startThread(CodexThreadOptions options) {this.options=options;return id;}
         public void resumeThread(String id,CodexThreadOptions options) {resumed=id;this.options=options;}
@@ -93,6 +102,6 @@ class ConversationCodexGatewayTest {
         public void interruptTurn(String id,String turn) {interrupted=turn;}
         public void resolveApproval(String id,ApprovalDecision decision) {resolved=id;}
         public boolean isAvailable() {return available;}
-        public void close() {closed=true;}
+        public void close() {if(failClose)throw new CodexException("still executing");closed=true;}
     }
 }

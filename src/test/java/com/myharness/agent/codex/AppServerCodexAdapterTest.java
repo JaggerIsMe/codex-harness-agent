@@ -22,6 +22,63 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class AppServerCodexAdapterTest {
+    @Test void stillRejectsUnauthorizedMcpWhenRuntimeIgnoresPluginDisable(@TempDir Path workspace) {
+        var mapper=new ObjectMapper();
+        for(boolean resume:List.of(false,true)) {
+            var adapter=new AppServerCodexAdapter(new AgentProperties(),mapper) {
+                @Override JsonNode request(String method,JsonNode input) {
+                    ObjectNode result=mapper.createObjectNode();
+                    if("mcpServerStatus/list".equals(method)) {
+                        var data=result.putArray("data");result.putNull("nextCursor");
+                        if(input.path("threadId").isTextual())
+                            data.addObject().put("name","openai-api-key-local-confirmation").put("runtimeStatus","connected");
+                    } else if("thread/read".equals(method)) {
+                        result.putObject("thread").put("id","plugin-thread").put("cwd",workspace.toString());
+                    } else if("thread/start".equals(method) || "thread/resume".equals(method)) {
+                        result.putObject("activePermissionProfile").put("id",input.path("permissions").asText());
+                        result.putObject("thread").put("id","plugin-thread").put("cwd",workspace.toString());
+                    } else if(!"skills/extraRoots/set".equals(method)) throw new AssertionError("Unexpected RPC: "+method);
+                    return result;
+                }
+            };
+            var options=new CodexThreadOptions("project",workspace,null).withExpertRuntime(List.of(),List.of());
+            var failure=assertThrows(CodexException.class,()-> {
+                if(resume) adapter.resumeThread("plugin-thread",options);else adapter.startThread(options);
+            });
+            assertEquals("检测到未由当前 Expert 授权的 MCP Server：openai-api-key-local-confirmation",failure.getMessage());
+            assertThrows(CodexException.class,()->adapter.startTurn("plugin-thread",new CodexTurnInput("hello"),
+                    org.mockito.Mockito.mock(CodexEventListener.class)));
+        }
+    }
+
+    @Test void doesNotActivatePluginMcpMissingFromTheInitialInventory(@TempDir Path workspace) {
+        for(boolean resume:List.of(false,true)) {
+            var mapper=new ObjectMapper();
+            var adapter=new AppServerCodexAdapter(new AgentProperties(),mapper) {
+                private boolean pluginsEnabled=true;
+                @Override JsonNode request(String method,JsonNode input) {
+                    ObjectNode result=mapper.createObjectNode();
+                    if("mcpServerStatus/list".equals(method)) {
+                        var data=result.putArray("data");result.putNull("nextCursor");
+                        if(input.path("threadId").isTextual() && pluginsEnabled)
+                            data.addObject().put("name","openai-api-key-local-confirmation").put("runtimeStatus","connected");
+                    } else if("thread/read".equals(method)) {
+                        result.putObject("thread").put("id","plugin-thread").put("cwd",workspace.toString());
+                    } else if("thread/start".equals(method) || "thread/resume".equals(method)) {
+                        // Plugin discovery occurs for the thread, independently of the initial MCP inventory.
+                        pluginsEnabled=input.path("config").path("features").path("plugins").asBoolean(true);
+                        result.putObject("activePermissionProfile").put("id",input.path("permissions").asText());
+                        result.putObject("thread").put("id","plugin-thread").put("cwd",workspace.toString());
+                    } else if(!"skills/extraRoots/set".equals(method)) throw new AssertionError("Unexpected RPC: "+method);
+                    return result;
+                }
+            };
+            var options=new CodexThreadOptions("project",workspace,null).withExpertRuntime(List.of(),List.of());
+            if(resume) adapter.resumeThread("plugin-thread",options);
+            else assertEquals("plugin-thread",adapter.startThread(options));
+        }
+    }
+
     @Test void rejectsMissingOrMismatchedEffectiveTargetDespiteMatchingThreadMetadata(@TempDir Path workspace) {
         var mapper=new ObjectMapper();
         var runtime=new com.myharness.agent.entity.dto.ModelRuntimeDTO();runtime.setSchemaVersion(2);
@@ -103,6 +160,7 @@ class AppServerCodexAdapterTest {
         new AppServerCodexAdapter(new AgentProperties(),new ObjectMapper()).configureMcpServers(params,options);
 
         assertEquals("user",params.path("config").path("approvals_reviewer").asText());
+        assertFalse(params.path("config").path("features").path("plugins").asBoolean(true));
         JsonNode github=params.path("config").path("mcp_servers").path("github");
         assertEquals("npx",github.path("command").asText());assertEquals(workspace.toString(),github.path("cwd").asText());
         assertEquals("approve",github.path("default_tools_approval_mode").asText());

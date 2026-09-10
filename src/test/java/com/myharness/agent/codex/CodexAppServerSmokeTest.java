@@ -30,6 +30,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @EnabledIfSystemProperty(named = "codex.smoke", matches = "true")
 class CodexAppServerSmokeTest {
     @Test
+    void startsIsolatedExpertWithoutInheritingPluginMcpServers(@TempDir Path workspace) {
+        var properties=new AgentProperties();properties.setCodexRequestTimeoutSeconds(30);
+        properties.setCodexCommand(System.getProperty("codex.smoke.command",properties.getCodexCommand()));
+        try(var adapter=new AppServerCodexAdapter(properties,new ObjectMapper())) {
+            var options=new CodexThreadOptions("empty-expert-mcp-probe",workspace,null)
+                    .withExpertRuntime(List.of(),List.of());
+            String thread=adapter.startThread(options);
+            assertNotNull(thread);
+        }
+    }
+
+    @Test
     @EnabledIfSystemProperty(named = "codex.turn.smoke", matches = "true")
     void repliesAfterSwitchingManagedProviderToLocalAndBack(@TempDir Path workspace,@TempDir Path data) throws Exception {
         ObjectMapper json=new ObjectMapper();

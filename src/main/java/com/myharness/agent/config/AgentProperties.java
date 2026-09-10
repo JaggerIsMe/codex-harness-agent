@@ -17,6 +17,15 @@ import java.util.List;
 @Validated
 @ConfigurationProperties(prefix = "harness.agent")
 public class AgentProperties {
+    @Min(1) private int workspaceArchiveMaxFiles=100;
+    @Min(1) private long workspaceArchiveMaxTotalBytes=100L*1024*1024;
+    @Min(1) private long workspaceArchiveMaxOutputBytes=110L*1024*1024;
+    public int getWorkspaceArchiveMaxFiles(){return workspaceArchiveMaxFiles;}
+    public void setWorkspaceArchiveMaxFiles(int value){workspaceArchiveMaxFiles=value;}
+    public long getWorkspaceArchiveMaxTotalBytes(){return workspaceArchiveMaxTotalBytes;}
+    public void setWorkspaceArchiveMaxTotalBytes(long value){workspaceArchiveMaxTotalBytes=value;}
+    public long getWorkspaceArchiveMaxOutputBytes(){return workspaceArchiveMaxOutputBytes;}
+    public void setWorkspaceArchiveMaxOutputBytes(long value){workspaceArchiveMaxOutputBytes=value;}
     private boolean responsesHistoryCompatibility;
     public boolean isResponsesHistoryCompatibility(){return responsesHistoryCompatibility;}
     public void setResponsesHistoryCompatibility(boolean value){responsesHistoryCompatibility=value;}

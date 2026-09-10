@@ -167,7 +167,9 @@ public class AgentServerConnection extends AbstractWebSocketHandler implements S
                 ? "WINDOWS_PROJECT_PROFILE" : "UNSUPPORTED";
         RegisterEventDTO payload = new RegisterEventDTO(properties.getDeviceName(), AgentMetadata.version(),
                 osName,System.getProperty("os.version"),isolationMode,workspaceRegistry.list(),
-                workspaceRegistry.roots());
+                workspaceRegistry.roots()).withWorkspaceFileLimits(new com.myharness.agent.entity.dto.WorkspaceFileLimitsDTO(
+                        properties.getWorkspaceArchiveMaxFiles(),properties.getMaxAttachmentBytes(),properties.getWorkspaceArchiveMaxTotalBytes(),
+                        properties.getWorkspaceArchiveMaxOutputBytes(),512*1024,300));
         return new AgentEvent(AgentEventType.REGISTER, null, payload);
     }
 
