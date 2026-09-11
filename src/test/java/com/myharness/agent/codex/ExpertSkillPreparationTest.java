@@ -32,7 +32,7 @@ class ExpertSkillPreparationTest {
         properties=new AgentProperties();properties.setDataDir(root.resolve("data"));
         var allowed=new WorkspaceProperties();allowed.setName("project");allowed.setPath(workspace);properties.setWorkspaces(List.of(allowed));
         var registry=new WorkspaceRegistry(properties,new ObjectMapper());
-        var installer=new SkillInstallationService(properties,(url,target,max)->{try{Files.copy(zip,target);}catch(Exception e){throw new SkillException("fixture",e);}},registry);
+        var installer=new ExpertSkillCache(properties,(url,target,max)->{try{Files.copy(zip,target);}catch(Exception e){throw new SkillException("fixture",e);}},registry);
         preparation=new ExpertSkillPreparation(installer,registry);
         turn=new StartTurnCommandDTO();turn.setTurnId("1");turn.setConversationId("1");turn.setWorkspaceName("project");turn.setProjectId("project");
         var runtime=new ExpertRuntimeDTO();runtime.setProjectRevision(1L);runtime.setRuntimeKey("a".repeat(64));runtime.setExpertId(1L);runtime.setExpertVersionId(1L);runtime.setSystemPrompt("Use Skills");
@@ -63,15 +63,6 @@ class ExpertSkillPreparationTest {
         assertTrue(preparation.prepare(turn,new AttachmentPreparation()).isEmpty());
         assertTrue(Files.exists(Path.of(first.getFirst().path())));
         assertTrue(Files.exists(Path.of(second.getFirst().path())));
-    }
-    @Test void removesOnlyOwnedLegacyDirectoriesAndPreservesManualSkills() throws Exception {
-        Path managed=Files.createDirectories(workspace.resolve(".agents/skills/harness-expert-1-1"));
-        Files.writeString(managed.resolve("SKILL.md"),"legacy");
-        Files.writeString(managed.resolve(".harness-expert-managed"),"harness-project-expert-v1");
-        Path manual=Files.createDirectories(workspace.resolve(".agents/skills/harness-expert-manual"));
-        Files.writeString(manual.resolve("SKILL.md"),"manual");
-        preparation.prepare(turn,new AttachmentPreparation());
-        assertFalse(Files.exists(managed));assertEquals("manual",Files.readString(manual.resolve("SKILL.md")));
     }
     @Test void rejectsLegacyProtocolAndInvalidConversationIdentifiers() {
         turn.getExpertRuntime().setSchemaVersion(1);

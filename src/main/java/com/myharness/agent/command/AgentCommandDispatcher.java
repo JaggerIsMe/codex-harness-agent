@@ -6,20 +6,15 @@ import com.myharness.agent.connection.AgentEventBus;
 import com.myharness.agent.connection.ProtocolCodec;
 import com.myharness.agent.entity.dto.ErrorEventDTO;
 import com.myharness.agent.entity.dto.CreateWorkspaceCommandDTO;
-import com.myharness.agent.entity.dto.InstallSkillCommandDTO;
 import com.myharness.agent.entity.dto.InterruptTurnCommandDTO;
 import com.myharness.agent.entity.dto.PongEventDTO;
 import com.myharness.agent.entity.dto.ProtocolEnvelope;
-import com.myharness.agent.entity.dto.RemoveSkillCommandDTO;
 import com.myharness.agent.entity.dto.ResolveApprovalCommandDTO;
-import com.myharness.agent.entity.dto.SkillResultEventDTO;
 import com.myharness.agent.entity.dto.StartThreadCommandDTO;
 import com.myharness.agent.entity.dto.StartTurnCommandDTO;
 import com.myharness.agent.entity.dto.WorkspaceCreateResultEventDTO;
 import com.myharness.agent.entity.enums.AgentCommandType;
 import com.myharness.agent.entity.enums.AgentEventType;
-import com.myharness.agent.skill.SkillException;
-import com.myharness.agent.skill.SkillInstallationService;
 import com.myharness.agent.workspace.WorkspaceRegistry;
 import org.springframework.stereotype.Component;
 
@@ -41,17 +36,15 @@ public class AgentCommandDispatcher {
     @jakarta.annotation.PreDestroy public void close(){turnExecutor.shutdownNow();fileExecutor.shutdownNow();}
     private final CommandDeduplicator deduplicator;
     private final AgentSessionManager sessionManager;
-    private final SkillInstallationService skillService;
     private final WorkspaceRegistry workspaceRegistry;
     private final AgentEventBus eventBus;
 
     public AgentCommandDispatcher(ProtocolCodec codec, CommandDeduplicator deduplicator,
-                                  AgentSessionManager sessionManager, SkillInstallationService skillService,
+                                  AgentSessionManager sessionManager,
                                   WorkspaceRegistry workspaceRegistry, AgentEventBus eventBus) {
         this.codec = codec;
         this.deduplicator = deduplicator;
         this.sessionManager = sessionManager;
-        this.skillService = skillService;
         this.workspaceRegistry = workspaceRegistry;
         this.eventBus = eventBus;
     }
@@ -104,10 +97,6 @@ public class AgentCommandDispatcher {
                     return Collections.emptyList();
                 case RESOLVE_APPROVAL:
                     return one(sessionManager.resolveApproval(codec.payload(envelope, ResolveApprovalCommandDTO.class)));
-                case INSTALL_SKILL:
-                    return install(envelope);
-                case REMOVE_SKILL:
-                    return remove(envelope);
                 case CREATE_WORKSPACE:
                     return createWorkspace(envelope);
                 case REFRESH_WORKSPACES:
@@ -123,30 +112,6 @@ public class AgentCommandDispatcher {
             return error(envelope, exception.getErrorCode(), exception.getMessage());
         } catch (RuntimeException exception) {
             return error(envelope, "COMMAND_FAILED", safeMessage(exception));
-        }
-    }
-
-    private List<AgentEvent> install(ProtocolEnvelope envelope) {
-        InstallSkillCommandDTO command = codec.payload(envelope, InstallSkillCommandDTO.class);
-        try {
-            SkillResultEventDTO result = skillService.install(command);
-            return one(new AgentEvent(AgentEventType.SKILL_INSTALL_RESULT, envelope.getCorrelationId(), result));
-        } catch (SkillException exception) {
-            SkillResultEventDTO result = new SkillResultEventDTO(command.getSkillId(), command.getVersion(),
-                    false, null, exception.getMessage());
-            return one(new AgentEvent(AgentEventType.SKILL_INSTALL_RESULT, envelope.getCorrelationId(), result));
-        }
-    }
-
-    private List<AgentEvent> remove(ProtocolEnvelope envelope) {
-        RemoveSkillCommandDTO command = codec.payload(envelope, RemoveSkillCommandDTO.class);
-        try {
-            SkillResultEventDTO result = skillService.remove(command);
-            return one(new AgentEvent(AgentEventType.SKILL_REMOVE_RESULT, envelope.getCorrelationId(), result));
-        } catch (SkillException exception) {
-            SkillResultEventDTO result = new SkillResultEventDTO(command.getSkillId(), command.getVersion(),
-                    false, null, exception.getMessage());
-            return one(new AgentEvent(AgentEventType.SKILL_REMOVE_RESULT, envelope.getCorrelationId(), result));
         }
     }
 

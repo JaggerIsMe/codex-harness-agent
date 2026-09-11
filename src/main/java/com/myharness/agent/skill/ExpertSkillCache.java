@@ -1,9 +1,6 @@
 package com.myharness.agent.skill;
 
 import com.myharness.agent.config.AgentProperties;
-import com.myharness.agent.entity.dto.InstallSkillCommandDTO;
-import com.myharness.agent.entity.dto.RemoveSkillCommandDTO;
-import com.myharness.agent.entity.dto.SkillResultEventDTO;
 import com.myharness.agent.workspace.WorkspaceRegistry;
 import org.apache.commons.compress.archivers.zip.ZipArchiveEntry;
 import org.apache.commons.compress.archivers.zip.ZipArchiveInputStream;
@@ -31,7 +28,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 @Component
-public class SkillInstallationService {
+public class ExpertSkillCache {
     private static final String VERSION_MARKER = ".harness-version";
     private static final int UNIX_FILE_TYPE_MASK = 0170000;
     private static final int UNIX_REGULAR_FILE = 0100000;
@@ -40,50 +37,36 @@ public class SkillInstallationService {
     private final AgentProperties properties;
     private final SkillDownloadClient downloadClient;
     private final WorkspaceRegistry workspaceRegistry;
-    private final Path skillsDirectory;
-    private final Path defaultSkillsDirectory;
-    private final Path legacySkillsDirectory;
     private final Path temporaryDirectory;
 
-    public SkillInstallationService(AgentProperties properties, SkillDownloadClient downloadClient,
+    public ExpertSkillCache(AgentProperties properties, SkillDownloadClient downloadClient,
                                     WorkspaceRegistry workspaceRegistry) {
         this.properties = properties;
         this.downloadClient = downloadClient;
         this.workspaceRegistry = workspaceRegistry;
         Path dataDirectory = properties.getDataDir().toAbsolutePath().normalize();
-        this.defaultSkillsDirectory = java.nio.file.Paths.get(System.getProperty("user.home"), ".agents", "skills").toAbsolutePath().normalize();
-        this.legacySkillsDirectory = java.nio.file.Paths.get(System.getProperty("user.home"), ".codex", "skills").toAbsolutePath().normalize();
-        this.skillsDirectory = (properties.getSkillInstallDir() == null ? dataDirectory.resolve("skills") : properties.getSkillInstallDir())
-                .toAbsolutePath().normalize();
         this.temporaryDirectory = dataDirectory.resolve("tmp");
         try {
-            Files.createDirectories(skillsDirectory);
             Files.createDirectories(temporaryDirectory);
         } catch (IOException exception) {
             throw new SkillException("Unable to prepare Skill directories", exception);
         }
     }
 
-    public synchronized SkillResultEventDTO install(InstallSkillCommandDTO command) {
-        return install(command,null);
-    }
-
-    public synchronized SkillResultEventDTO install(InstallSkillCommandDTO command, com.myharness.agent.attachment.AttachmentPreparation preparation) {
+    public synchronized Path prepare(ExpertSkillCacheRequest command, com.myharness.agent.attachment.AttachmentPreparation preparation) {
         if(preparation!=null) preparation.check();
         validateInstall(command);
-        String skillId = safeSegment(command.getSkillId(), "skillId");
-        if (command.getSkillName() != null) safeSegment(command.getSkillName(), "skillName");
+        String skillId = safeSegment(command.skillId(), "skillId");
         String directoryName = safeSegment("harness-" + skillId, "managedSkillDirectory");
-        String version = safeSegment(command.getVersion(), "version");
-        Path scopeRoot = scopeRoot(command.getScopeType(), command.getWorkspaceName());
+        String version = safeSegment(command.version(), "version");
+        Path scopeRoot = scopeRoot(command.workspaceName());
         Path finalDirectory = scopeRoot.resolve(directoryName).normalize();
-        migrateLegacyGlobal(command.getScopeType(), directoryName, finalDirectory);
         ensureInside(scopeRoot, finalDirectory);
         if (Files.isDirectory(finalDirectory.resolve("SKILL.md"))) {
             throw new SkillException("Installed SKILL.md must be a file");
         }
         if (Files.isRegularFile(finalDirectory.resolve("SKILL.md")) && installedVersion(finalDirectory).equals(version)) {
-            return success(command, finalDirectory);
+            return finalDirectory;
         }
 
         Path operationDirectory = temporaryDirectory.resolve("skill-" + UUID.randomUUID()).normalize();
@@ -91,42 +74,19 @@ public class SkillInstallationService {
         Path extracted = operationDirectory.resolve("extracted");
         try {
             Files.createDirectories(extracted);
-            downloadClient.download(command.getDownloadUrl(), archive, megabytes(properties.getSkillMaxDownloadSizeMb()),preparation);
-            verifySha256(archive, command.getSha256());
+            downloadClient.download(command.downloadUrl(), archive, megabytes(properties.getSkillMaxDownloadSizeMb()),preparation);
+            verifySha256(archive, command.sha256());
             extract(archive, extracted);
             if(preparation!=null) preparation.check();
             Path skillRoot = findSkillRoot(extracted);
             Files.write(skillRoot.resolve(VERSION_MARKER), version.getBytes(StandardCharsets.UTF_8));
             Files.createDirectories(finalDirectory.getParent());
             replaceAtomically(skillRoot, finalDirectory);
-            return success(command, finalDirectory);
+            return finalDirectory;
         } catch (IOException exception) {
             throw new SkillException("Unable to install Skill", exception);
         } finally {
             deleteTreeQuietly(operationDirectory);
-        }
-    }
-
-    public SkillResultEventDTO remove(RemoveSkillCommandDTO command) {
-        if (command == null) {
-            throw new SkillException("Remove Skill command is required");
-        }
-        String skillId = safeSegment(command.getSkillId(), "skillId");
-        if (command.getSkillName() != null) safeSegment(command.getSkillName(), "skillName");
-        String directoryName = safeSegment("harness-" + skillId, "managedSkillDirectory");
-        String version = safeSegment(command.getVersion(), "version");
-        Path scopeRoot = scopeRoot(command.getScopeType(), command.getWorkspaceName());
-        Path target = scopeRoot.resolve(directoryName).normalize();
-        migrateLegacyGlobal(command.getScopeType(), directoryName, target);
-        ensureInside(scopeRoot, target);
-        try {
-            if (Files.isDirectory(target) && !installedVersion(target).equals(version)) {
-                throw new SkillException("Refusing to remove a different installed Skill version");
-            }
-            deleteTree(target);
-            return new SkillResultEventDTO(command.getSkillId(), command.getVersion(), true, null, null);
-        } catch (IOException exception) {
-            throw new SkillException("Unable to remove Skill", exception);
         }
     }
 
@@ -232,51 +192,24 @@ public class SkillInstallationService {
         }
     }
 
-    private void validateInstall(InstallSkillCommandDTO command) {
+    private void validateInstall(ExpertSkillCacheRequest command) {
         if (command == null) {
             throw new SkillException("Install Skill command is required");
         }
-        safeSegment(command.getSkillId(), "skillId");
-        safeSegment(command.getVersion(), "version");
-        if (command.getDownloadUrl() == null || command.getDownloadUrl().trim().isEmpty()) {
+        safeSegment(command.skillId(), "skillId");
+        safeSegment(command.version(), "version");
+        if (command.downloadUrl() == null || command.downloadUrl().trim().isEmpty()) {
             throw new SkillException("downloadUrl must not be blank");
         }
-        validateScope(command.getScopeType(), command.getWorkspaceName());
+        if(command.workspaceName()==null || command.workspaceName().isBlank()) throw new SkillException("workspaceName is required");
     }
 
-    private Path scopeRoot(String rawScopeType, String workspaceName) {
-        String scopeType = rawScopeType == null ? "GLOBAL" : rawScopeType.trim();
-        validateScope(scopeType, workspaceName);
-        if ("GLOBAL".equals(scopeType)) return skillsDirectory;
+    private Path scopeRoot(String workspaceName) {
         try {
-            String relative = "EXPERT".equals(scopeType) ? ".harness/expert-skills" : ".agents/skills";
-            Path requested = workspaceRegistry.resolve(workspaceName, relative);
+            Path requested=workspaceRegistry.resolve(workspaceName,".harness/expert-skills");
             Files.createDirectories(requested);
-            return workspaceRegistry.resolve(workspaceName, relative).toRealPath();
-        } catch (IOException | RuntimeException exception) {
-            throw new SkillException("Unable to prepare the project Skill directory", exception);
-        }
-    }
-
-    private void validateScope(String rawScopeType, String workspaceName) {
-        String scopeType = rawScopeType == null ? "GLOBAL" : rawScopeType.trim();
-        if (!("GLOBAL".equals(scopeType) || "PROJECT".equals(scopeType) || "EXPERT".equals(scopeType)))
-            throw new SkillException("scopeType must be GLOBAL or PROJECT");
-        if (!"GLOBAL".equals(scopeType) && (workspaceName == null || workspaceName.trim().isEmpty()))
-            throw new SkillException("workspaceName is required for a project Skill");
-    }
-
-    private void migrateLegacyGlobal(String rawScopeType, String directoryName, Path target) {
-        String scopeType = rawScopeType == null ? "GLOBAL" : rawScopeType.trim();
-        if (!"GLOBAL".equals(scopeType) || !skillsDirectory.equals(defaultSkillsDirectory) || Files.exists(target)) return;
-        Path legacy = legacySkillsDirectory.resolve(directoryName).normalize();
-        if (!legacy.startsWith(legacySkillsDirectory) || !Files.isRegularFile(legacy.resolve(VERSION_MARKER))) return;
-        try {
-            Files.createDirectories(target.getParent());
-            moveAtomically(legacy, target);
-        } catch (IOException exception) {
-            throw new SkillException("Unable to migrate the legacy global Skill directory", exception);
-        }
+            return workspaceRegistry.resolve(workspaceName,".harness/expert-skills").toRealPath();
+        } catch(IOException | RuntimeException error) {throw new SkillException("Unable to prepare expert Skill cache",error);}
     }
 
     private String safeSegment(String value, String field) {
@@ -284,10 +217,6 @@ public class SkillInstallationService {
             throw new SkillException(field + " contains unsupported characters");
         }
         return value;
-    }
-
-    private SkillResultEventDTO success(InstallSkillCommandDTO command, Path path) {
-        return new SkillResultEventDTO(command.getSkillId(), command.getVersion(), true, path.toString(), null);
     }
 
     private void moveAtomically(Path source, Path target) throws IOException {

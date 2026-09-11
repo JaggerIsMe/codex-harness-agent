@@ -13,7 +13,6 @@ final class ExpertSkillActivation {
     private static final String OWNER="harness-project-expert-v1";
     static List<CodexSkillInput> sync(WorkspaceRegistry registry,String workspace,String relativeRoot,List<CodexSkillInput> cached,AttachmentPreparation cancellation) {
         try {
-            cleanupLegacy(registry,workspace,cancellation);
             Path root=registry.resolve(workspace,relativeRoot);
             Files.createDirectories(root);root=registry.resolve(workspace,relativeRoot).toRealPath();
             if(!root.equals(registry.resolve(workspace,"").resolve(relativeRoot)))
@@ -49,20 +48,6 @@ final class ExpertSkillActivation {
             }
             return List.copyOf(active);
         } catch(IOException failure) {throw new CodexException("无法准备会话独立的专家 Skills",failure);}
-    }
-    private static void cleanupLegacy(WorkspaceRegistry registry,String workspace,AttachmentPreparation cancellation) throws IOException {
-        Path root=registry.resolve(workspace,".agents/skills");
-        if(!Files.isDirectory(root)) return;
-        if(!root.equals(registry.resolve(workspace,"").resolve(".agents/skills")))
-            throw new CodexException("共享技能目录不能重定向到其他目录");
-        try(var children=Files.list(root)) {
-            for(Path child:children.toList()) {
-                cancellation.check();String name=child.getFileName().toString();
-                if(!name.startsWith("harness-expert-")) continue;
-                Path checked=registry.resolve(workspace,".agents/skills/"+name);
-                if(checked.equals(child) && owned(checked)) delete(checked);
-            }
-        }
     }
     private static boolean owned(Path directory) throws IOException {
         Path marker=directory.resolve(MARKER);

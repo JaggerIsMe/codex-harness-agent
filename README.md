@@ -10,7 +10,7 @@ Harness Agent 运行在目标电脑上，通过主动 WSS 连接接受 Harness S
 - 将设备身份原子保存到 `${harness.agent.data-dir}/device-identity.json`。
 - WSS 设备鉴权、注册事件、心跳、1/2/5/10/30 秒退避重连。
 - 固定协议版本、消息类型白名单、有界命令去重和重复结果重放。
-- `START_THREAD`、`START_TURN`、`INTERRUPT_TURN`、`INSTALL_SKILL`、`REMOVE_SKILL`、`CREATE_WORKSPACE`、`REFRESH_WORKSPACES`、`PING` 命令。
+- `START_THREAD`、`START_TURN`、`INTERRUPT_TURN`、`CREATE_WORKSPACE`、`REFRESH_WORKSPACES`、`PING` 命令。
 - 单 Codex App Server 进程、JSON-RPC 初始化、项目/Thread/Turn 映射和流式事件。
 - Agent 重启后按 Server 保存的 Codex Thread ID 恢复已有 Conversation，核验工作区后续聊原历史。
 - 严格项目模式下强制 Codex 原生 Windows `elevated` 沙箱，不允许降级到 `unelevated`，也不允许通过审批扩大项目权限。
@@ -18,7 +18,7 @@ Harness Agent 运行在目标电脑上，通过主动 WSS 连接接受 Harness S
 - 全局 Turn 并发限制与同一 Conversation 单活动 Turn 限制。
 - 工作区名称解析，以及绝对路径、父目录、符号链接、工作区嵌套和 Agent 数据目录逃逸防护。
 - 在预授权父目录内原子创建动态工作区，并持久化到 `${harness.agent.data-dir}/workspaces.json` 以支持重启恢复和请求幂等。
-- Skill 同源鉴权下载、SHA-256 校验、Zip Slip/链接/特殊文件拦截、展开限制；全局 Skill 原子安装到 `${harness.agent.skill-install-dir}`（默认 `${user.home}/.agents/skills`），项目级 Skill 安装到工作区 `.agents/skills`。
+- 专家 Skill 同源鉴权下载、SHA-256 校验、安全解压和展开限制；仅缓存到授权工作区 `.harness/expert-skills/`，并在会话独立目录加载。
 
 受管 Expert 的新建与恢复线程均设置 `features.apps=false`、`features.plugins=false`，防止本机安装的插件向会话注入额外 MCP Server。专家快照中授权的 MCP 配置和 Skill 继续显式加载，线程建立后仍执行 MCP 白名单检查。此设置只作用于 Harness 线程，不修改用户 Codex 配置或卸载插件。更新 Agent 后需重启 Agent，再在原 Conversation 中重试失败的请求。
 

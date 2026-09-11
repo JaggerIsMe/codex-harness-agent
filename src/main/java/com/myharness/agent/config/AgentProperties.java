@@ -53,7 +53,6 @@ public class AgentProperties {
     @NotNull
     private Path dataDir;
 
-    private Path skillInstallDir;
 
     @Min(1)
     private int maxConcurrentTurns = 1;
@@ -211,13 +210,7 @@ public class AgentProperties {
         return skillMaxDownloadSizeMb;
     }
 
-    public Path getSkillInstallDir() {
-        return skillInstallDir;
-    }
 
-    public void setSkillInstallDir(Path skillInstallDir) {
-        this.skillInstallDir = skillInstallDir;
-    }
 
     public void setSkillMaxDownloadSizeMb(long skillMaxDownloadSizeMb) {
         this.skillMaxDownloadSizeMb = skillMaxDownloadSizeMb;

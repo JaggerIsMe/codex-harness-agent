@@ -20,7 +20,6 @@ harness:
     enrollment-code: ENR-CEXG-EPUW
     device-name: jagger-device
     data-dir: ${project.folder}/.my-harness-agent
-    skill-install-dir: ${project.folder}/.agents/skills
     max-concurrent-turns: 1
     workspace-archive-max-files: 100
     workspace-archive-max-total-bytes: 104857600
