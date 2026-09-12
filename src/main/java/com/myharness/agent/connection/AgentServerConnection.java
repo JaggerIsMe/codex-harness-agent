@@ -36,6 +36,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 @Component
+@org.springframework.context.annotation.DependsOn("projectIsolationCheck")
 public class AgentServerConnection extends AbstractWebSocketHandler implements SmartLifecycle {
     private static final Logger LOGGER = LoggerFactory.getLogger(AgentServerConnection.class);
     private static final int[] BACKOFF_SECONDS = {1, 2, 5, 10, 30};
@@ -162,9 +163,7 @@ public class AgentServerConnection extends AbstractWebSocketHandler implements S
 
     private AgentEvent registerEvent() {
         String osName=System.getProperty("os.name");
-        String isolationMode=osName!=null && osName.toLowerCase(java.util.Locale.ROOT).contains("win")
-                && properties.isStrictProjectIsolation() && "elevated".equalsIgnoreCase(properties.getWindowsSandbox())
-                ? "WINDOWS_PROJECT_PROFILE" : "UNSUPPORTED";
+        String isolationMode=properties.isolationMode(osName);
         RegisterEventDTO payload = new RegisterEventDTO(properties.getDeviceName(), AgentMetadata.version(),
                 osName,System.getProperty("os.version"),isolationMode,workspaceRegistry.list(),
                 workspaceRegistry.roots()).withWorkspaceFileLimits(new com.myharness.agent.entity.dto.WorkspaceFileLimitsDTO(

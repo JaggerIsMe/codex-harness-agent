@@ -11,6 +11,16 @@ import java.util.Locale;
 import java.util.regex.Pattern;
 
 final class CodexProcessCommand {
+    static List<String> version(String configured) {
+        var base=appServer(configured);
+        if(base.size()==5 && "/c".equals(base.get(3))) {
+            var result=new ArrayList<>(base);
+            String invocation=result.get(4);
+            result.set(4,invocation.substring(0,invocation.length()-" app-server --stdio".length())+" --version");
+            return result;
+        }
+        return List.of(base.get(0),"--version");
+    }
     private CodexProcessCommand() {
     }
 
@@ -53,18 +63,21 @@ final class CodexProcessCommand {
         }
 
         boolean windows=osName != null && osName.toLowerCase(Locale.ROOT).contains("win");
-        if (strictIsolation && !windows) {
-            throw new CodexException("Strict project isolation requires Windows 10 1809+ or Windows 11");
+        boolean linux="Linux".equalsIgnoreCase(osName);
+        if (strictIsolation && !windows && !linux) {
+            throw new CodexException("Strict project isolation requires a supported Linux sandbox");
         }
-        if (strictIsolation && !"elevated".equalsIgnoreCase(windowsSandbox)) {
+        if (strictIsolation && windows && !"elevated".equalsIgnoreCase(windowsSandbox)) {
             throw new CodexException("Strict project isolation requires the Codex elevated Windows sandbox");
         }
         List<String> arguments=new ArrayList<>();
         arguments.add("app-server");
         if (strictIsolation) {
             arguments.add("--strict-config");
-            arguments.add("-c");
-            arguments.add("windows.sandbox=\"elevated\"");
+            if(windows) {
+                arguments.add("-c");
+                arguments.add("windows.sandbox=\"elevated\"");
+            }
         }
         if(modelCatalog!=null) {
             arguments.add("-c");

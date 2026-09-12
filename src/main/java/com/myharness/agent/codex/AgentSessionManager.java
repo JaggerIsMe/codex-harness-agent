@@ -224,9 +224,9 @@ public class AgentSessionManager {
         if (command.getDecision() == null) {
             throw new AgentOperationException("INVALID_COMMAND", "decision must not be null");
         }
-        codexGateway.resolveApproval(command.getRequestId(), command.getDecision());
+        codexGateway.resolveApproval(command.getRequestId(), command.getDecision(), command.getAnswers());
         return new AgentEvent(AgentEventType.APPROVAL_RESOLVED, command.getRequestId(),
-                new ApprovalResolvedEventDTO(command.getRequestId(), command.getDecision()));
+                new ApprovalResolvedEventDTO(command.getRequestId(), command.getDecision(), command.getDecisionMessageId()));
     }
 
     public int activeTurnCount() {

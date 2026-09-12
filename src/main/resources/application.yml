@@ -31,6 +31,7 @@ harness:
     responses-history-compatibility: true
     strict-project-isolation: true
     windows-sandbox: elevated
+    windows-python: ${project.folder}/runtime/python/python.exe
     codex-request-timeout-seconds: 30
     skill-max-download-size-mb: 20
     skill-max-file-count: 500

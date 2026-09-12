@@ -1,0 +1,31 @@
+services:
+  agent:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        CODEX_VERSION: "0.153.0"
+    init: true
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: 2
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=256m,mode=1777
+    environment:
+      HARNESS_SERVER_URL: ${HARNESS_SERVER_URL:?Set a wss URL for Harness Server}
+      HARNESS_ENROLLMENT_URL: ${HARNESS_ENROLLMENT_URL:?Set an https enrollment URL}
+      HARNESS_ENROLLMENT_CODE: ${HARNESS_ENROLLMENT_CODE:-}
+      HARNESS_DEVICE_NAME: ${HARNESS_DEVICE_NAME:-isolated-linux-agent}
+    volumes:
+      - workspace:/workspaces
+      - agent-state:/var/lib/harness
+      - codex-state:/home/harness/.codex
+volumes:
+  workspace:
+  agent-state:
+  codex-state:

@@ -1,93 +1,37 @@
 # Harness Agent
 
-Harness Agent 运行在目标电脑上，通过主动 WSS 连接接受 Harness Server 指令，并在受控工作区内驱动本机 `codex app-server`。
+Harness Agent 通过主动 WSS 连接接受 Harness Server 指令，并在项目专用执行环境中驱动 `codex app-server`。
 
-用户与机器授权模块要求升级到本版 Agent：上报 `WINDOWS_PROJECT_PROFILE`，创建/恢复线程时启用并核验每项目独立权限配置；旧写入隔离模式不能执行多用户项目。详见 [隔离边界、升级与验收](../../docs/user-device-rbac.md)。
+支持现有 Windows 上直接运行 Agent，通过 LPAC 隔离模型代码，不需要虚拟机。运行时配置和兼容性见 [Windows 原生隔离](../../docs/windows-agent-isolation.md)。[Linux 容器/虚拟机](../../docs/linux-agent-isolation.md) 是另一个部署选项，当前开发环境尚未完成 Linux 实机验收。
 
-已实现的 V1 功能：
+图片查看、本机 Codex 生图、补丁编辑和结构化命令通过受控工具恢复，原生工具开关仍关闭。新增工具需要升级 Agent 后新建会话；第三方生图、Maven 和多 Agent 的当前限制见 [受控工具恢复与验证](../../docs/controlled-windows-tools.md)。
 
-- 一次性注册码注册设备，或直接使用已签发的设备编码和设备令牌。
-- 将设备身份原子保存到 `${harness.agent.data-dir}/device-identity.json`。
-- WSS 设备鉴权、注册事件、心跳、1/2/5/10/30 秒退避重连。
-- 固定协议版本、消息类型白名单、有界命令去重和重复结果重放。
-- `START_THREAD`、`START_TURN`、`INTERRUPT_TURN`、`CREATE_WORKSPACE`、`REFRESH_WORKSPACES`、`PING` 命令。
-- 单 Codex App Server 进程、JSON-RPC 初始化、项目/Thread/Turn 映射和流式事件。
-- Agent 重启后按 Server 保存的 Codex Thread ID 恢复已有 Conversation，核验工作区后续聊原历史。
-- 严格项目模式下强制 Codex 原生 Windows `elevated` 沙箱，不允许降级到 `unelevated`，也不允许通过审批扩大项目权限。
-- 每个 Turn 使用唯一项目目录作为 `writableRoots`，关闭网络访问，并拒绝不同项目复用或重叠执行目录。
-- 全局 Turn 并发限制与同一 Conversation 单活动 Turn 限制。
-- 工作区名称解析，以及绝对路径、父目录、符号链接、工作区嵌套和 Agent 数据目录逃逸防护。
-- 在预授权父目录内原子创建动态工作区，并持久化到 `${harness.agent.data-dir}/workspaces.json` 以支持重启恢复和请求幂等。
-- 专家 Skill 同源鉴权下载、SHA-256 校验、安全解压和展开限制；仅缓存到授权工作区 `.harness/expert-skills/`，并在会话独立目录加载。
+## 权限与执行
 
-受管 Expert 的新建与恢复线程均设置 `features.apps=false`、`features.plugins=false`，防止本机安装的插件向会话注入额外 MCP Server。专家快照中授权的 MCP 配置和 Skill 继续显式加载，线程建立后仍执行 MCP 白名单检查。此设置只作用于 Harness 线程，不修改用户 Codex 配置或卸载插件。更新 Agent 后需重启 Agent，再在原 Conversation 中重试失败的请求。
+- Java 21、Maven 3.6.3+；容器镜像固定 Codex 0.153.0。
+- Linux 每个 Thread 使用独立 named permission profile；Windows 关闭原生本地执行工具，通过独立 Python 运行时和 LPAC 执行。只读运行时与当前 Workspace 为授权范围，命令禁网，不继承 Agent 凭证环境变量；元数据目录移除继承写授权并设置只读权限。
+- Agent 在注册前进行真实访问自检，Windows 通过后上报 `WINDOWS_LPAC_V1`，Linux 通过后上报 `LINUX_PROJECT_PROFILE_V1`；失败停止启动。
+- Server 同时支持上述 Windows 和 Linux 能力，不再将旧 `WINDOWS_PROJECT_PROFILE` 视为读取隔离。Windows 当前固定验证 Codex 0.153.0，需要配置 `windows-python` 专用运行时。
+- 容器配置的 `max-workspaces=1` 保证独占分配，重启和相同请求重试不会创建第二个项目。裸 Linux 虚拟机部署也应为每个项目使用独立 Agent、工作目录和操作系统边界。
+- 每个会话有独立 App Server 进程，恢复时校验持久化 Thread 的 Workspace 归属；支持流式事件、中断和幂等重试。
 
-中台对接协议见 [Harness Agent API 文档](../../docs/harness-agent-api.md)，HTTP 接口定义见 [OpenAPI](../../docs/harness-agent-openapi.yaml)。
+容器入口使用独立的 `deploy/application-container.yml`，不会加载源码中的旧 Windows 开发配置。`deploy/compose.yml` 不挂载宿主机私人目录或 Docker socket，不使用 privileged；如果内核或运行时阻止 sandbox，应配置受支持环境，不得绕过自检。
 
-## 前置条件
+## 注册与状态
 
-- Java 21，构建使用 Maven 3.6.3+。Spring Boot 3.5.16；主代码与测试的编译目标均为 21，不再支持 Java 8 运行。
-- Windows 11（推荐），或 Windows 10 1809+（Codex 官方标注为 best-effort）。无需 Docker Desktop 或 WSL2。
-- 目标用户已安装 `codex`，且 `codex app-server --stdio` 可运行。
-- 目标用户已在本机完成 Codex 登录；Harness Server 不接触 Codex 凭证。
-- 静态工作区和允许创建工作区的父目录都必须预先存在，并使用绝对路径配置。
+按部署文档设置 `HARNESS_SERVER_URL`、`HARNESS_ENROLLMENT_URL`、`HARNESS_ENROLLMENT_CODE` 与可选的 `HARNESS_DEVICE_NAME`。远程地址必须使用 WSS/HTTPS。首次注册取得的 Device 身份保存在容器专用 Agent 状态卷；每个容器使用不同注册码和 Compose project name。
 
-## 身份配置
+平台为 Device 分配运行模型及对应用户后即可创建 Project。升级 Windows LPAC 后，原 Project 和文件保留，旧 Conversation 只保留历史，需要在原项目中新建会话使用新工具；新模式创建的会话可正常恢复。详见 [ADR 0018](../../docs/adr/0018-linux-project-read-isolation.md)。
 
-已有设备身份时：
+## 执行确认
 
-```powershell
-$env:HARNESS_DEVICE_CODE = 'device-001'
-$env:HARNESS_DEVICE_TOKEN = '首次注册取得的设备令牌'
-```
+Turn 使用 `approvalPolicy=on-request`。Agent 拒绝原生命令/文件扩权审批，并通过 `approvalBlocked` 消息展示平台拦截原因。用户要求执行前确认时，运行指令引导模型通过 `request_user_input` 发起 `harness-confirm-action`，前端提供批准本次、拒绝操作、拒绝并中断。批准只回复工具输入，不改变权限；不支持本会话批准。
 
-首次注册时只配置一次性注册码，成功后 Agent 会把设备编码和令牌保存到数据目录：
+`features.default_mode_request_user_input` 在 Codex 中仍属于开发中功能。执行确认由模型选择工具，不是每条命令的强制拦截。确认协议和严格读取隔离应分别验证，见 [审批验收](../../docs/testing/approval-flow.md) 与 [Linux 隔离验收](../../docs/linux-agent-isolation.md)。
 
-```powershell
-$env:HARNESS_ENROLLMENT_CODE = '一次性注册码'
-$env:HARNESS_ENROLLMENT_URL = 'http://localhost:9010/api/v1/agent/enroll'
-```
+受管 Expert 禁用本机 Apps/Plugins 继承，只显式加载授权 Skill 和 MCP，并检查 MCP 白名单；外部 MCP 的权限仍由对应服务控制。
 
-配置值优先于已保存的身份。日志和 WebSocket 消息正文都不会输出设备令牌。
-
-## 常用配置
-
-```powershell
-$env:HARNESS_SERVER_URL = 'ws://localhost:9010/ws/agent'
-$env:HARNESS_DEVICE_NAME = 'development-pc'
-$env:HARNESS_AGENT_DATA_DIR = 'D:/my-harness/agent-data'
-$env:HARNESS_WORKSPACE_PATH = 'D:/workspace/harness'
-$env:HARNESS_MAX_CONCURRENT_TURNS = '1'
-$env:HARNESS_HEARTBEAT_INTERVAL_SECONDS = '15'
-$env:HARNESS_CODEX_COMMAND = 'codex'
-$env:HARNESS_STRICT_PROJECT_ISOLATION = 'true'
-$env:HARNESS_WINDOWS_SANDBOX = 'elevated'
-```
-
-生产环境的远程 Server 必须使用 `https`/`wss`。`http`/`ws` 只允许 `localhost`、`127.0.0.1` 或 `::1`。
-
-多个工作区使用本地 YAML 配置：
-
-```yaml
-harness:
-  agent:
-    workspaces:
-      - name: harness
-        path: D:/workspace/harness
-      - name: demo-project
-        path: D:/workspace/demo-project
-    workspace-roots:
-      - name: development-projects
-        path: D:/workspace/projects
-```
-
-`workspaces` 注册已有项目，`workspace-roots` 只授权中台在其直接子目录下创建新项目。Agent 数据目录不能与工作区或授权父目录重叠；不同工作区也不能互为父子。中台只传逻辑父目录名称和工作区名称，不能传任意绝对工作目录。
-
-`strict-project-isolation` 默认开启。开启后 Agent 只在 Windows 上启动 Codex，并用 `--strict-config -c windows.sandbox="elevated"` 启动 App Server；Turn 固定使用 `approvalPolicy=never`、`workspaceWrite`、禁网和单一项目根目录。启动或执行失败时直接报错，不会回退到弱沙箱。
-
-生产机器还应由管理员把 [config/codex-requirements.toml](config/codex-requirements.toml) 安装到 `%ProgramData%\OpenAI\Codex\requirements.toml`。这是 Codex 官方的系统级强制策略位置，模板只允许 `elevated`，可防止机器上的其他 Codex 配置回退到 `unelevated`。
-
-注意：`windows.allowed_sandbox_implementations` 是 `requirements.toml` 的策略字段，不能复制到 `%USERPROFILE%\.codex\config.toml`。否则 `--strict-config` 会报 `unknown configuration field windows.allowed_sandbox_implementations` 并终止启动。用户配置中的 `[windows]` 使用 `sandbox = "elevated"` 选择沙箱；系统策略使用单独的 `requirements.toml` 限定允许的实现。
+中台协议见 [Harness Agent API](../../docs/harness-agent-api.md) 和 [OpenAPI](../../docs/harness-agent-openapi.yaml)。
 
 ## Workspace 文件与消息附件
 
@@ -114,7 +58,7 @@ java -jar target/harness-agent-1.0.0-SNAPSHOT.jar
 
 测试覆盖协议校验、命令去重、会话并发、工作区逃逸和 Skill 安装安全校验。
 
-Agent 不访问数据库，因此不引入 MyBatis、MySQL 或 Redis 客户端。WebSocket 连接使用 Spring 6 的 `execute` / `CompletableFuture` API；Jakarta 校验与关闭清理已适配。继续使用非 Web 进程保活和现有线程模型，未启用虚拟线程。
+Agent 不访问数据库，因此不引入 MyBatis、MySQL 或 Redis 客户端。WebSocket 连接使用 Spring 6 的 `execute` / `CompletableFuture` API；继续使用非 Web 进程保活。Windows 隔离命令在受限数量的虚拟线程中等待，进程树由 Windows Job 管理。
 
 测试 JVM 的 Mockito agent 和模块内临时目录由 POM 配置，不必额外传 `argLine`。IDE、Maven Runner 和运行 Agent 的服务/终端须统一使用 JDK 21；旧的全局 `jdk-1.8` Maven profile 需在本机设置中调整。
 
@@ -152,4 +96,4 @@ mvn '-Dcodex.smoke=true' '-Dtest=CodexAppServerSmokeTest' test
 mvn '-Dcodex.smoke=true' '-Dtest=CodexAppServerSmokeTest#resumesExistingStoredThreadWithoutSendingModelRequest' '-Dcodex.resume.thread=<已有Thread ID>' '-Dcodex.resume.workspace=<原工作区绝对路径>' test
 ```
 
-恢复使用官方 [Codex App Server 的 thread/read 与 thread/resume 协议](https://learn.chatgpt.com/docs/app-server)。恢复前后都会校验 Thread ID 和目录；执行 Turn 时继续强制单工作区、禁网与 `approvalPolicy=never`。
+恢复使用官方 [Codex App Server 的 thread/read 与 thread/resume 协议](https://learn.chatgpt.com/docs/app-server)。恢复前后都会校验 Thread ID 和目录；执行 Turn 时继续使用项目权限 profile、命令禁网与 `approvalPolicy=on-request`，并重新配置执行前确认能力。

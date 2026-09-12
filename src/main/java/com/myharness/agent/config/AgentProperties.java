@@ -61,6 +61,31 @@ public class AgentProperties {
 
     private boolean strictProjectIsolation = true;
 
+    @Min(0) private int maxWorkspaces;
+    public int getMaxWorkspaces() { return maxWorkspaces; }
+    public void setMaxWorkspaces(int value) { maxWorkspaces=value; }
+    private volatile boolean readIsolationVerified;
+    public void confirmReadIsolation() { readIsolationVerified=true; }
+    private Path windowsPython;
+    public Path getWindowsPython() {return windowsPython;}
+    public void setWindowsPython(Path value) {windowsPython=value;}
+    @Valid private java.util.Map<String,WindowsTool> windowsTools=new java.util.LinkedHashMap<>();
+    public java.util.Map<String,WindowsTool> getWindowsTools(){return windowsTools;}
+    public void setWindowsTools(java.util.Map<String,WindowsTool> value){windowsTools=value==null?new java.util.LinkedHashMap<>():value;}
+    public static class WindowsTool {
+        @NotNull private Path home;
+        @NotBlank private String executable;
+        public Path getHome(){return home;} public void setHome(Path value){home=value;}
+        public String getExecutable(){return executable;} public void setExecutable(String value){executable=value;}
+    }
+
+    public String isolationMode(String osName) {
+        if(!strictProjectIsolation || !readIsolationVerified) return "UNSUPPORTED";
+        if("Linux".equalsIgnoreCase(osName)) return "LINUX_PROJECT_PROFILE_V1";
+        if(osName!=null && osName.startsWith("Windows")) return "WINDOWS_LPAC_V1";
+        return "UNSUPPORTED";
+    }
+
     @NotBlank @Pattern(regexp="(?i)elevated")
     private String windowsSandbox = "elevated";
 

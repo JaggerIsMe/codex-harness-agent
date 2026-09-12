@@ -26,6 +26,7 @@ final class ResponsesCompatibilityProxy implements AutoCloseable {
     private final String upstream,identity,prefix="/"+UUID.randomUUID();
     private final boolean standaloneSearch;
     private final boolean imageGeneration;
+    private volatile Map<String,List<String>> imageHeaders=Map.of();
     private String thread;
     private volatile ResponsesHistoryPolicy policy;
     private volatile Consumer<String> notice=ignored->{ };
@@ -106,6 +107,13 @@ final class ResponsesCompatibilityProxy implements AutoCloseable {
                     body=json.writeValueAsBytes(projection.request());
                 }
             }
+            if(imageGeneration&&!standaloneTool&&exchange.getRequestHeaders().getFirst("Authorization")!=null) {
+                Map<String,List<String>> headers=new HashMap<>();
+                for(String name:List.of("Authorization","ChatGPT-Account-ID","OpenAI-Organization","OpenAI-Project","originator","User-Agent")) {
+                    var values=exchange.getRequestHeaders().get(name);if(values!=null)headers.put(name,List.copyOf(values));
+                }
+                imageHeaders=Map.copyOf(headers);
+            }
             if(search) searchRequests.incrementAndGet();else if(image) imageRequests.incrementAndGet();else requests.incrementAndGet();
             var builder=HttpRequest.newBuilder(URI.create(upstream+suffix)).timeout(Duration.ofMinutes(5))
                     .POST(HttpRequest.BodyPublishers.ofByteArray(body));
@@ -162,6 +170,22 @@ final class ResponsesCompatibilityProxy implements AutoCloseable {
         return c==-1 && line.isEmpty()?null:line.toString();
     }
     private byte[] bounded(InputStream input) throws IOException {byte[] value=input.readNBytes(MAX_BYTES+1);if(value.length>MAX_BYTES) throw ResponsesHistoryPolicy.failure("Responses payload exceeds 64 MiB limit");return value;}
+    boolean supportsControlledImages(){return imageGeneration;}
+    byte[] generateControlledImage(com.fasterxml.jackson.databind.node.ObjectNode payload,boolean edit,String turnId) throws Exception {
+        if(!imageGeneration||policy==null)throw new CodexException("当前模型未接通图片生成服务");
+        Map<String,List<String>> headers=imageHeaders;
+        if(headers.isEmpty())throw new CodexException("未获得当前 Codex 请求的图片服务认证，请重新登录 Codex 后重试");
+        var request=HttpRequest.newBuilder(URI.create(upstream+(edit?"/images/edits":"/images/generations")))
+                .timeout(Duration.ofMinutes(5)).header("Content-Type","application/json").header("x-codex-image-turn-id",turnId)
+                .POST(HttpRequest.BodyPublishers.ofByteArray(json.writeValueAsBytes(payload)));
+        headers.forEach((key,values)->values.forEach(value->request.header(key,value)));
+        imageRequests.incrementAndGet();
+        var response=client.send(request.build(),ignored->new BoundedImageResponse());lastImageStatus=response.statusCode();
+        if(response.statusCode()!=200)throw new CodexException("图片生成服务返回 HTTP "+response.statusCode()+"，请检查认证、服务能力或用量；未自动重试");
+        var image=json.readTree(response.body()).path("data").path(0).path("b64_json");
+        if(!image.isTextual()||image.asText().length()>14*1024*1024)throw new CodexException("图片服务没有返回受支持的图片数据");
+        try{return Base64.getDecoder().decode(image.asText());}catch(IllegalArgumentException failure){throw new CodexException("图片服务返回无效数据");}
+    }
     static boolean forwardHeader(String key) {
         // HTTP/2 pseudo headers are not valid HTTP/1.1 response headers.
         return key.matches("[!#$%&'*+.^_`|~0-9A-Za-z-]+") && !HOP.contains(key.toLowerCase(Locale.ROOT));
@@ -180,6 +204,7 @@ final class ResponsesCompatibilityProxy implements AutoCloseable {
         exchange.sendResponseHeaders(status,bytes.length);exchange.getResponseBody().write(bytes);
     }
     @Override public void close() {
+        imageHeaders=Map.of();
         server.stop(0);streams.forEach(stream->{try {stream.close();} catch(IOException ignored) { }});
         executor.shutdownNow();client.shutdownNow();if(policy!=null) policy.close();
     }

@@ -48,15 +48,19 @@ public class WorkspaceRegistry {
     private final AtomicReference<Snapshot> snapshot = new AtomicReference<>();
     private final ReentrantLock mutationLock = new ReentrantLock();
     private List<DynamicWorkspaceRecord> dynamicRecords;
+    private final int maxWorkspaces;
 
     public WorkspaceRegistry(AgentProperties properties, ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
+        this.maxWorkspaces=properties.getMaxWorkspaces();
         this.dataDirectory = prepareDataDirectory(properties.getDataDir());
         this.manifestFile = dataDirectory.resolve(MANIFEST_FILE_NAME);
         this.roots = loadRoots(properties.getWorkspaceRoots());
         this.rootViews = rootViews(roots);
         this.configuredWorkspaces = loadConfiguredWorkspaces(properties.getWorkspaces());
         this.dynamicRecords = loadManifest();
+        if(maxWorkspaces>0 && configuredWorkspaces.size()+dynamicRecords.size()>maxWorkspaces)
+            throw new IllegalStateException("Workspace count exceeds this Agent's configured isolation capacity");
         this.snapshot.set(recoverSnapshot());
     }
 
@@ -99,6 +103,8 @@ public class WorkspaceRegistry {
                 return continueCreation(existingRequest);
             }
 
+            if(maxWorkspaces>0 && configuredWorkspaces.size()+dynamicRecords.size()>=maxWorkspaces)
+                throw failure("WORKSPACE_CAPACITY_REACHED","This isolated Agent already belongs to a project; provision a separate Agent for another project");
             RegisteredRoot parent = findRoot(parentName);
             Path target = target(parent, workspaceName);
             rejectWorkspaceConflict(workspaceName, target, null);

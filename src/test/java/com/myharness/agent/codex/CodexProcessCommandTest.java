@@ -51,7 +51,19 @@ class CodexProcessCommandTest {
     }
 
     @Test
-    void rejectsNonWindowsStrictIsolationWithoutFallback() {
-        assertThrows(CodexException.class,() -> CodexProcessCommand.appServer("codex",true,"elevated","Linux",null,null));
+    void startsStrictLinuxWithoutWindowsOptions() {
+        assertEquals(List.of("codex","app-server","--strict-config","--stdio"),
+                CodexProcessCommand.appServer("codex",true,"elevated","Linux",null,null));
+        assertThrows(CodexException.class,() -> CodexProcessCommand.appServer("codex",true,"elevated","Mac OS X",null,null));
+    }
+
+    @Test void advertisesSupportedPlatformsOnlyAfterVerification() {
+        var properties=new com.myharness.agent.config.AgentProperties();
+        assertEquals("UNSUPPORTED",properties.isolationMode("Linux"));
+        properties.confirmReadIsolation();
+        assertEquals("LINUX_PROJECT_PROFILE_V1",properties.isolationMode("Linux"));
+        assertEquals("WINDOWS_LPAC_V1",properties.isolationMode("Windows 11"));
+        properties.setStrictProjectIsolation(false);
+        assertEquals("UNSUPPORTED",properties.isolationMode("Linux"));
     }
 }

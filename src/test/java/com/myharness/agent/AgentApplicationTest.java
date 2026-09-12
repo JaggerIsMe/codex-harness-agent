@@ -69,6 +69,8 @@ class AgentApplicationTest {
         command.add("--harness.agent.device-code=test-device");
         command.add("--harness.agent.device-token=test-token");
         command.add("--harness.agent.data-dir=" + dataDirectory.toAbsolutePath());
+        command.add("--spring.main.allow-bean-definition-overriding=true");
+        command.add("--spring.main.sources="+ProbeFixture.class.getName());
         command.add("--harness.agent.workspace-roots[0].name=test-root");
         command.add("--harness.agent.workspace-roots[0].path=" + workspace.toAbsolutePath());
         command.add("--harness.agent.workspaces[0].name=test-workspace");
@@ -87,6 +89,15 @@ class AgentApplicationTest {
             Thread.sleep(50L);
         }
         return output;
+    }
+
+    @org.springframework.boot.test.context.TestConfiguration
+    public static class ProbeFixture {
+        // This fixture tests transport lifetime and deliberately advertises UNSUPPORTED.
+        @org.springframework.context.annotation.Bean("projectIsolationCheck")
+        com.myharness.agent.codex.ProjectIsolationCheck check() {
+            return org.mockito.Mockito.mock(com.myharness.agent.codex.ProjectIsolationCheck.class);
+        }
     }
 
     private String read(Path outputFile) throws IOException {

@@ -180,6 +180,19 @@ class WorkspaceRegistryTest {
         assertEquals("WORKSPACE_ALREADY_EXISTS", duplicateName.getErrorCode());
     }
 
+    @Test void singleProjectCapacitySurvivesRestartAndAllowsIdempotentRetry() throws IOException {
+        Path parent=Files.createDirectory(temporaryDirectory.resolve("isolated"));
+        AgentProperties properties=properties();properties.setMaxWorkspaces(1);
+        properties.setWorkspaceRoots(Collections.singletonList(workspaceRoot("isolated",parent)));
+        WorkspaceRegistry registry=new WorkspaceRegistry(properties,new ObjectMapper());
+        var command=createCommand("isolated-1","isolated","project-one");
+        assertTrue(registry.create(command).isSuccess());
+        registry=new WorkspaceRegistry(properties,new ObjectMapper());
+        assertTrue(registry.create(command).isSuccess());
+        assertEquals("WORKSPACE_CAPACITY_REACHED",registry.create(createCommand("isolated-2","isolated","project-two")).getErrorCode());
+        assertFalse(Files.exists(parent.resolve("project-two")));
+    }
+
     private WorkspaceRegistry registry(WorkspaceProperties workspace) {
         AgentProperties properties = properties();
         properties.setWorkspaces(Collections.singletonList(workspace));

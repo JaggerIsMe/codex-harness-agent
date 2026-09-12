@@ -85,7 +85,10 @@ public class ConversationCodexGateway implements CodexGateway {
                 listener.onApproval(new CodexApproval(token,approval.getType(),approval.getDetails()));
             }
             @Override public void onCompleted(String turnId,String status,String reason) {
-                if(terminal.compareAndSet(false,true)) {idle(entry);listener.onCompleted(turnId,status,reason);}
+                if(terminal.compareAndSet(false,true)) {
+                    approvals.entrySet().removeIf(value -> value.getValue().entry==entry);
+                    idle(entry);listener.onCompleted(turnId,status,reason);
+                }
             }
         };
         try {return entry.gateway.startTurn(id,input,forwarding);}
@@ -97,9 +100,16 @@ public class ConversationCodexGateway implements CodexGateway {
     }
     @Override public void interruptTurn(String threadId,String turnId) {required(threadId).gateway.interruptTurn(threadId,turnId);}
     @Override public void resolveApproval(String requestId,ApprovalDecision decision) {
-        ApprovalRoute route=approvals.remove(requestId);
+        resolveApproval(requestId,decision,null);
+    }
+    @Override public void resolveApproval(String requestId,ApprovalDecision decision,com.fasterxml.jackson.databind.JsonNode answers) {
+        ApprovalRoute route=approvals.get(requestId);
         if(route==null) throw new CodexException("Unknown or expired conversation approval");
-        route.entry.gateway.resolveApproval(route.nativeId,decision);
+        synchronized(route) {
+            if(approvals.get(requestId)!=route) throw new CodexException("Unknown or expired conversation approval");
+            route.entry.gateway.resolveApproval(route.nativeId,decision,answers);
+            approvals.remove(requestId,route);
+        }
     }
     @Override public synchronized void closeThread(String id) {
         Entry entry=threads.get(id);

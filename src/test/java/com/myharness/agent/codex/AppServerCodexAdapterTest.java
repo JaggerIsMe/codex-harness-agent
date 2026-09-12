@@ -276,7 +276,8 @@ class AppServerCodexAdapterTest {
         assertEquals("first",first.path("input").get(0).path("text").asText());
         assertTrue(first.path("collaborationMode").path("settings").path("developer_instructions").asText().contains("Java expert"));
         assertFalse(second.toString().contains("Java expert"));assertTrue(second.toString().contains("SQL expert"));
-        assertTrue(cleared.path("collaborationMode").path("settings").path("developer_instructions").isNull());
+        assertTrue(cleared.path("collaborationMode").path("settings").path("developer_instructions").asText().contains(ExecutionConfirmation.QUESTION_ID));
+        assertFalse(cleared.toString().contains("SQL expert"));
         assertEquals("test-model",cleared.path("collaborationMode").path("settings").path("model").asText());
         assertEquals(1,cleared.path("input").size());
         assertFalse(cleared.toString().contains("Review project code."));
@@ -350,6 +351,10 @@ class AppServerCodexAdapterTest {
         assertEquals(profile,resume.path("config").path("default_permissions").asText());
         var policy=resume.path("config").path("permissions").path(profile);
         assertEquals(":workspace",policy.path("extends").asText());
+        assertEquals("deny",policy.path("filesystem").path(":root").asText());
+        assertEquals("read",policy.path("filesystem").path(":minimal").asText());
+        assertEquals("deny",policy.path("filesystem").path(":tmpdir").asText());
+        assertEquals("deny",policy.path("filesystem").path(":slash_tmp").asText());
         assertEquals("write",policy.path("filesystem").path(":workspace_roots").path(".").asText());
         assertEquals("read",policy.path("filesystem").path(":workspace_roots").path(".git").asText());
         assertEquals("read",policy.path("filesystem").path(":workspace_roots").path(".codex").asText());
@@ -419,9 +424,79 @@ class AppServerCodexAdapterTest {
         var approval=org.mockito.ArgumentCaptor.forClass(CodexApproval.class);
         org.mockito.Mockito.verify(listener).onApproval(approval.capture());
         assertEquals("MCP_TOOL_CALL",approval.getValue().getType().name());
-        adapter.resolveApproval("mcp-approval",com.myharness.agent.entity.enums.ApprovalDecision.ACCEPT);
+        assertThrows(com.myharness.agent.command.AgentOperationException.class,()->adapter.resolveApproval("mcp-approval",com.myharness.agent.entity.enums.ApprovalDecision.ACCEPT));
+        var answers=mapper.createObjectNode();answers.putObject("approval").putArray("answers").add("Accept");
+        adapter.resolveApproval("mcp-approval",com.myharness.agent.entity.enums.ApprovalDecision.ACCEPT,answers);
         JsonNode response=adapter.writes.getLast();
         assertEquals("Accept",response.path("result").path("answers").path("approval").path("answers").get(0).asText());
+    }
+
+    @Test
+    void strictIsolationDeclinesCommandAndFileApprovalWithoutPromptingUser(@TempDir Path workspace) {
+        var adapter=new StoredThreadAdapter(workspace);
+        var listener=org.mockito.Mockito.mock(CodexEventListener.class);
+        adapter.resumeThread("original-thread",new CodexThreadOptions("project",workspace,null));
+        adapter.startTurn("original-thread",new CodexTurnInput("inspect workspace",null,null),listener);
+        for(String method:List.of("item/commandExecution/requestApproval","item/fileChange/requestApproval")) {
+            var request=new ObjectMapper().createObjectNode().put("id",method).put("method",method);
+            request.putObject("params").put("threadId","original-thread").put("turnId","new-turn");
+            adapter.handleMessage(request);
+            assertEquals("decline",adapter.writes.getLast().path("result").path("decision").asText());
+            org.mockito.Mockito.verify(listener,org.mockito.Mockito.never()).onApproval(org.mockito.ArgumentMatchers.any());
+        }
+        var events=org.mockito.ArgumentCaptor.forClass(CodexEvent.class);
+        org.mockito.Mockito.verify(listener,org.mockito.Mockito.times(2)).onEvent(events.capture());
+        for(var event:events.getAllValues()) {
+            assertEquals("approvalBlocked",event.getDetails().path("type").asText());
+            assertTrue(event.getContent().contains("并非用户拒绝"));
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"ACCEPT,批准本次","DECLINE,拒绝操作","CANCEL,拒绝并中断"})
+    void executionConfirmationReturnsOnlyToolInputAndRetainsSandbox(String decision,String answer,@TempDir Path workspace) {
+        var adapter=new StoredThreadAdapter(workspace);
+        var listener=org.mockito.Mockito.mock(CodexEventListener.class);
+        adapter.resumeThread("original-thread",new CodexThreadOptions("project",workspace,null));
+        var resume=adapter.params.get(1);
+        assertTrue(resume.path("config").path("features").path("default_mode_request_user_input").asBoolean());
+        assertTrue(resume.path("developerInstructions").asText().contains(ExecutionConfirmation.QUESTION_ID));
+        assertFalse(resume.path("config").path("permissions").elements().next().path("network").path("enabled").asBoolean());
+        adapter.startTurn("original-thread",new CodexTurnInput("执行前让我确认"),listener);
+        var request=confirmationRequest("confirm-1");
+        adapter.handleMessage(request);
+        assertTrue(adapter.writes.isEmpty(),"Do not return a tool answer before the user decides");
+        var captured=org.mockito.ArgumentCaptor.forClass(CodexApproval.class);
+        org.mockito.Mockito.verify(listener).onApproval(captured.capture());
+        assertEquals(com.myharness.agent.entity.enums.ApprovalType.EXECUTION_CONFIRMATION,captured.getValue().getType());
+        adapter.resolveApproval("confirm-1",com.myharness.agent.entity.enums.ApprovalDecision.valueOf(decision));
+        var result=adapter.writes.getLast().path("result");
+        assertEquals(answer,result.path("answers").path(ExecutionConfirmation.QUESTION_ID).path("answers").get(0).asText());
+        assertFalse(result.has("decision"),"Consent must never grant native execution approval");
+        assertEquals("CANCEL".equals(decision),adapter.methods.contains("turn/interrupt"));
+        assertThrows(CodexException.class,()->adapter.resolveApproval("confirm-1",com.myharness.agent.entity.enums.ApprovalDecision.ACCEPT));
+    }
+
+    @Test void terminalTurnsExpireConfirmationAndInvalidDecisionsDoNotConsumeIt(@TempDir Path workspace) {
+        var adapter=new StoredThreadAdapter(workspace);
+        adapter.resumeThread("original-thread",new CodexThreadOptions("project",workspace,null));
+        adapter.startTurn("original-thread",new CodexTurnInput("confirm"),org.mockito.Mockito.mock(CodexEventListener.class));
+        adapter.handleMessage(confirmationRequest("confirm-1"));
+        assertThrows(CodexException.class,()->adapter.resolveApproval("confirm-1",com.myharness.agent.entity.enums.ApprovalDecision.ACCEPT_FOR_SESSION));
+        var completed=new ObjectMapper().createObjectNode().put("method","turn/completed");
+        completed.putObject("params").put("threadId","original-thread").putObject("turn").put("id","new-turn").put("status","interrupted");
+        adapter.handleMessage(completed);
+        assertThrows(CodexException.class,()->adapter.resolveApproval("confirm-1",com.myharness.agent.entity.enums.ApprovalDecision.ACCEPT));
+        assertTrue(adapter.writes.isEmpty());
+    }
+
+    private ObjectNode confirmationRequest(String id) {
+        var request=new ObjectMapper().createObjectNode().put("id",id).put("method","item/tool/requestUserInput");
+        var params=request.putObject("params").put("threadId","original-thread").put("turnId","new-turn").put("itemId","confirm-tool");
+        var question=params.putArray("questions").addObject().put("id",ExecutionConfirmation.QUESTION_ID).put("question","读取当前项目的文件吗？");
+        var options=question.putArray("options");
+        for(String label:List.of("批准本次","拒绝操作","拒绝并中断")) options.addObject().put("label",label).put("description",label);
+        return request;
     }
 
     private static final class StoredThreadAdapter extends AppServerCodexAdapter {
@@ -455,7 +530,7 @@ class AppServerCodexAdapterTest {
             } else if ("turn/start".equals(method)) {
                 if (input.hasNonNull("permissions")) throw new CodexException("failed to load configuration: default_permissions requires a `[permissions]` table");
                 result.putObject("turn").put("id", "new-turn");
-            } else if ("skills/extraRoots/set".equals(method)) {
+            } else if ("skills/extraRoots/set".equals(method) || "turn/interrupt".equals(method)) {
                 return result;
             } else if ("skills/list".equals(method)) {
                 var group=result.putArray("data").addObject().put("cwd",workspace.toString());

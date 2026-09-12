@@ -10,14 +10,64 @@ import java.nio.file.*;
 import java.util.*;
 
 /** Ancestors cannot be renamed while pinned; changes address the opened object, never a reopened name. */
-final class WindowsWorkspaceHandles implements AutoCloseable {
+public final class WindowsWorkspaceHandles implements AutoCloseable {
     private interface Kernel extends StdCallLibrary {
         Kernel INSTANCE=Native.load("kernel32",Kernel.class,W32APIOptions.UNICODE_OPTIONS);
         boolean SetFileInformationByHandle(WinNT.HANDLE file,int informationClass,Pointer information,int length);
+        boolean SetFilePointerEx(WinNT.HANDLE file,long distance,Pointer position,int method);
+        boolean SetEndOfFile(WinNT.HANDLE file);
+    }
+    /** Exclusive data handle: no path reopening and no shared hard-link objects. */
+    static DataEntry data(Path path,boolean write,boolean create) throws IOException {
+        WinNT.HANDLE handle=Kernel32.INSTANCE.CreateFile(path.toString(),WinNT.GENERIC_READ|(write?WinNT.GENERIC_WRITE|WinNT.DELETE:0),
+                0,null,create?WinNT.CREATE_NEW:WinNT.OPEN_EXISTING,WinNT.FILE_FLAG_OPEN_REPARSE_POINT,null);
+        if(WinBase.INVALID_HANDLE_VALUE.equals(handle))throw error(Native.getLastError());
+        try {
+            WinBase.FILE_ATTRIBUTE_TAG_INFO tag=new WinBase.FILE_ATTRIBUTE_TAG_INFO();
+            if(!Kernel32.INSTANCE.GetFileInformationByHandleEx(handle,9,tag.getPointer(),new WinDef.DWORD(tag.size())))throw error(Native.getLastError());
+            tag.read();
+            if((tag.FileAttributes&(WinNT.FILE_ATTRIBUTE_REPARSE_POINT|WinNT.FILE_ATTRIBUTE_DIRECTORY))!=0)
+                throw new IOException("工具仅允许普通文件，不允许链接或目录");
+            Memory standard=new Memory(24);
+            if(!Kernel32.INSTANCE.GetFileInformationByHandleEx(handle,1,standard,new WinDef.DWORD(24)))throw error(Native.getLastError());
+            if(standard.getInt(16)!=1)throw new IOException("工具不允许共享硬链接文件");
+            return new DataEntry(handle,standard.getLong(8));
+        }catch(IOException|RuntimeException failure){Kernel32.INSTANCE.CloseHandle(handle);throw failure;}
+    }
+    static final class DataEntry implements AutoCloseable {
+        private final WinNT.HANDLE handle;
+        private final long length;
+        DataEntry(WinNT.HANDLE handle,long length){this.handle=handle;this.length=length;}
+        byte[] read(int limit) throws IOException {
+            if(length<0||length>limit)throw new IOException("文件超过工具大小限制");
+            var output=new java.io.ByteArrayOutputStream();byte[] buffer=new byte[8192];var count=new com.sun.jna.ptr.IntByReference();
+            while(true) {
+                if(Thread.currentThread().isInterrupted())throw new IOException("工具调用已取消");
+                if(!Kernel32.INSTANCE.ReadFile(handle,buffer,buffer.length,count,null))throw error(Native.getLastError());
+                if(count.getValue()==0)break;
+                if(output.size()+count.getValue()>limit)throw new IOException("文件超过工具大小限制");
+                output.write(buffer,0,count.getValue());
+            }
+            return output.toByteArray();
+        }
+        void write(byte[] bytes) throws IOException {
+            if(!Kernel.INSTANCE.SetFilePointerEx(handle,0,null,0))throw error(Native.getLastError());
+            var written=new com.sun.jna.ptr.IntByReference();
+            int offset=0;
+            while(offset<bytes.length) {
+                byte[] chunk=java.util.Arrays.copyOfRange(bytes,offset,Math.min(bytes.length,offset+8192));
+                if(!Kernel32.INSTANCE.WriteFile(handle,chunk,chunk.length,written,null)||written.getValue()==0)throw error(Native.getLastError());
+                offset+=written.getValue();
+            }
+            if(!Kernel.INSTANCE.SetEndOfFile(handle)||!Kernel32.INSTANCE.FlushFileBuffers(handle))throw error(Native.getLastError());
+        }
+        void relocate(Path destination) throws IOException {new OpenEntry(handle).relocate(destination);}
+        void delete() throws IOException {new OpenEntry(handle).delete();}
+        @Override public void close(){Kernel32.INSTANCE.CloseHandle(handle);}
     }
     private final List<WinNT.HANDLE> pins=new ArrayList<>();
     static boolean supported(){return Platform.isWindows();}
-    static WindowsWorkspaceHandles pin(Path root,Path... parents) throws IOException {
+    public static WindowsWorkspaceHandles pin(Path root,Path... parents) throws IOException {
         if(!supported())throw new WorkspaceFileException("UNSUPPORTED_FILESYSTEM","当前平台不支持安全的文件变更句柄");
         WindowsWorkspaceHandles result=new WindowsWorkspaceHandles();Set<Path> done=new HashSet<>();
         try {

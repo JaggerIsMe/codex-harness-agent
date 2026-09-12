@@ -45,6 +45,10 @@ public class AppServerCodexAdapter implements CodexGateway {
     private final Map<String, CodexEventListener> listenersByTurn = new ConcurrentHashMap<>();
     private final Map<String, CodexEventListener> listenersByThread = new ConcurrentHashMap<>();
     private final Map<String, Path> threadWorkspaces = new ConcurrentHashMap<>();
+    private final java.util.Set<String> imageInputThreads=ConcurrentHashMap.newKeySet();
+    private final Map<String,Thread> nativeCommands=new ConcurrentHashMap<>();
+    private final java.util.Set<String> cancelledNativeTurns=ConcurrentHashMap.newKeySet();
+    private boolean nativeWindows() {return properties.isStrictProjectIsolation() && properties.getWindowsPython()!=null && System.getProperty("os.name","").startsWith("Windows");}
     private final Map<String, String> threadModels = new ConcurrentHashMap<>();
     private ResponsesCompatibilityProxy historyProxy;
     private String historyStartupBase;
@@ -73,15 +77,19 @@ public class AppServerCodexAdapter implements CodexGateway {
         if (properties.isStrictProjectIsolation() && !hasText(options.getProjectId())) {
             throw new CodexException("Project ID is required in strict project isolation mode");
         }
+        prepareNativeWorkspace(options.getWorkspace());
         activateModelRuntime(options.getModelRuntime());
         ObjectNode params = objectMapper.createObjectNode();
         params.put("cwd", options.getWorkspace().toString());
         params.put("approvalPolicy", INTERACTIVE_APPROVAL_POLICY);
+        ExecutionConfirmation.configure(params);
         configureProjectPermissions(params, options.getWorkspace());
         ModelTarget modelTarget=configureModelTarget(params,options);
         configureHistoryProxy(params,options,modelTarget);
         configureMcpServers(params,options);
         disableInheritedMcpServers(params,options);
+        if(nativeWindows()) WindowsExecutionTools.configure(params,true,supportsImageInput(options),controlledImages());
+        if(nativeWindows()) WindowsExecutionTools.configureCommands(params,properties);
         params.put("ephemeral", false);
         if(options.isIsolatedExpertRuntime()) configureSkillRoots(options.getWorkspace(),options.getExpertSkills());
         JsonNode result = request("thread/start", params);
@@ -91,6 +99,8 @@ public class AppServerCodexAdapter implements CodexGateway {
         verifyMcpIsolation(threadId,options);
         if(historyProxy!=null) historyProxy.bind(threadId);
         threadWorkspaces.put(threadId, options.getWorkspace());
+        if(supportsImageInput(options))imageInputThreads.add(threadId);else imageInputThreads.remove(threadId);
+        if(nativeWindows()) markNativeThread(threadId,options.getWorkspace(),true);
         rememberModel(threadId,result,options.getModel());
         return threadId;
     }
@@ -104,6 +114,7 @@ public class AppServerCodexAdapter implements CodexGateway {
         if (properties.isStrictProjectIsolation() && !hasText(options.getProjectId())) {
             throw new CodexException("Project ID is required in strict project isolation mode");
         }
+        prepareNativeWorkspace(options.getWorkspace());
         activateModelRuntime(options.getModelRuntime());
         // Verify the persisted root before applying overrides: resume must not move another project's history.
         ObjectNode read = objectMapper.createObjectNode().put("threadId", threadId).put("includeTurns", false);
@@ -116,6 +127,7 @@ public class AppServerCodexAdapter implements CodexGateway {
             throw failure;
         }
         verifyThreadBinding(stored, threadId, options.getWorkspace());
+        if(nativeWindows()) markNativeThread(threadId,options.getWorkspace(),false);
         if ("active".equals(stored.path("status").path("type").asText())) {
             throw new CodexException("Cannot resume a Codex thread with an active Turn");
         }
@@ -123,11 +135,13 @@ public class AppServerCodexAdapter implements CodexGateway {
         params.put("threadId", threadId);
         params.put("cwd", options.getWorkspace().toString());
         params.put("approvalPolicy", INTERACTIVE_APPROVAL_POLICY);
+        ExecutionConfirmation.configure(params);
         configureProjectPermissions(params, options.getWorkspace());
         ModelTarget modelTarget=configureModelTarget(params,options);
         configureHistoryProxy(params,options,modelTarget);
         configureMcpServers(params,options);
         disableInheritedMcpServers(params,options);
+        if(nativeWindows()) WindowsExecutionTools.configure(params,false,supportsImageInput(options),controlledImages());
         // Extra skill roots are process-local. Register after transport bootstrap may restart
         // the discovery process, and before the resumed thread discovers its expert skills.
         if(options.isIsolatedExpertRuntime()) configureSkillRoots(options.getWorkspace(),options.getExpertSkills());
@@ -139,9 +153,15 @@ public class AppServerCodexAdapter implements CodexGateway {
         verifyThreadBinding(resumed, threadId, options.getWorkspace());
         verifyMcpIsolation(threadId,options);
         threadWorkspaces.put(threadId, options.getWorkspace());
+        if(supportsImageInput(options))imageInputThreads.add(threadId);else imageInputThreads.remove(threadId);
         rememberModel(threadId,resumeResult,options.getModel());
     }
 
+    private boolean supportsImageInput(CodexThreadOptions options) {
+        var runtime=options.getModelRuntime();
+        return runtime==null||"LOCAL_CODEX".equals(runtime.getRuntimeMode())||runtime.supports("IMAGE");
+    }
+    private boolean controlledImages(){return historyProxy!=null&&historyProxy.supportsControlledImages();}
     private void verifyThreadBinding(JsonNode thread, String threadId, Path workspace) {
         if (!threadId.equals(requiredText(thread, "id", "Codex thread response"))) {
             throw new CodexException("Resumed Codex thread ID does not match the Conversation");
@@ -154,6 +174,29 @@ public class AppServerCodexAdapter implements CodexGateway {
         } catch (IOException | java.nio.file.InvalidPathException exception) {
             throw new CodexException("Unable to verify stored Codex thread workspace", exception);
         }
+    }
+
+    private void markNativeThread(String threadId,Path workspace,boolean create) {
+        try {
+            Path directory=properties.getDataDir().resolve("native-windows-threads");
+            Path marker=directory.resolve(java.util.UUID.nameUUIDFromBytes(threadId.getBytes(StandardCharsets.UTF_8))+".txt");
+            String binding=workspace.toRealPath().toString();
+            if(create) {java.nio.file.Files.createDirectories(directory);java.nio.file.Files.writeString(marker,binding);}
+            else if(!java.nio.file.Files.isRegularFile(marker) || !java.nio.file.Files.readString(marker).equals(binding))
+                throw new CodexException("此会话使用旧 Windows 执行工具；请在当前项目中新建会话以启用读取隔离，旧历史保持可查看");
+        } catch(IOException failure) {throw new CodexException("Cannot verify native Windows thread binding",failure);}
+    }
+
+    private void prepareNativeWorkspace(Path workspace) {
+        if(!nativeWindows()) return;
+        try {
+            if(properties.getDataDir().toRealPath().startsWith(workspace.toRealPath()))
+                throw new CodexException("Agent 状态目录必须位于项目工作区之外");
+        } catch(IOException failure) {throw new CodexException("Cannot verify Agent state isolation",failure);}
+        if(java.nio.file.Files.exists(workspace.resolve(".codex/config.toml"),java.nio.file.LinkOption.NOFOLLOW_LINKS))
+            throw new CodexException("Windows 隔离项目不加载 .codex/config.toml；请由管理员将需要的配置迁入受控 Agent 配置");
+        var probe=WindowsIsolatedCommand.execute(workspace,"pass",15,properties.getWindowsPython());
+        if(probe.exitCode()!=0) throw new CodexException("Cannot initialize Windows project execution: "+probe.output());
     }
 
     private String profileId(Path workspace) {
@@ -228,8 +271,7 @@ public class AppServerCodexAdapter implements CodexGateway {
         ObjectNode settings=params.putObject("collaborationMode").put("mode","default").putObject("settings");
         settings.put("model",model);
         String instructions=expertInstructions(input.getExpertInstructions(),verifiedSkills);
-        if(instructions==null) settings.putNull("developer_instructions");
-        else settings.put("developer_instructions",instructions);
+        settings.put("developer_instructions",(instructions==null ? "" : instructions+"\n\n")+ExecutionConfirmation.INSTRUCTIONS);
     }
 
     private static String expertInstructions(String expertInstructions,List<CodexSkillInput> verifiedSkills) {
@@ -289,16 +331,14 @@ public class AppServerCodexAdapter implements CodexGateway {
     private void configureProjectPermissions(ObjectNode params,Path workspace) {
         String profile=profileId(workspace);
         params.put("permissions",profile);
-        ObjectNode config=params.putObject("config");
+        ObjectNode config=params.withObject("config");
         config.put("default_permissions",profile);
-        ObjectNode policy=config.putObject("permissions").putObject(profile);
-        policy.put("extends",":workspace");
-        ObjectNode filesystem=policy.putObject("filesystem");
-        ObjectNode project=filesystem.putObject(":workspace_roots");
-        project.put(".","write");
-        project.put(".git","read");
-        project.put(".codex","read");
-        policy.putObject("network").put("enabled",false);
+        config.putObject("permissions").set(profile,ProjectPermissionProfile.policy(objectMapper));
+        if("Linux".equalsIgnoreCase(System.getProperty("os.name"))) {
+            var environment=config.putObject("shell_environment_policy").put("inherit","none");
+            environment.putObject("set").put("PATH",System.getProperty("java.home")+"/bin:/usr/local/bin:/usr/bin:/bin")
+                    .put("JAVA_HOME",System.getProperty("java.home")).put("LANG","C.UTF-8");
+        }
     }
 
     private void activateModelRuntime(com.myharness.agent.entity.dto.ModelRuntimeDTO runtime) {
@@ -401,6 +441,7 @@ public class AppServerCodexAdapter implements CodexGateway {
             if(CODEX_APPS_MCP_SERVER.equals(code)) throw new CodexException("MCP Server Code codex_apps 是 Codex 保留名称");
             ObjectNode server=servers.putObject(code);
             if("STDIO".equals(runtime.getTransportType())) {
+                if(nativeWindows()) throw new CodexException("Windows 读取隔离暂不支持在宿主机启动 STDIO MCP；请使用隔离的远程 MCP 服务");
                 if(runtime.getCommand()==null || runtime.getCommand().isBlank()) throw new CodexException("MCP STDIO command 不能为空");
                 server.put("command",runtime.getCommand());ArrayNode args=server.putArray("args");
                 if(runtime.getArgs()!=null) runtime.getArgs().forEach(args::add);
@@ -408,6 +449,7 @@ public class AppServerCodexAdapter implements CodexGateway {
                 if("WORKSPACE".equals(runtime.getCwdMode())) server.put("cwd",options.getWorkspace().toString());
             } else if("STREAMABLE_HTTP".equals(runtime.getTransportType())) {
                 if(runtime.getUrl()==null || runtime.getUrl().isBlank()) throw new CodexException("MCP Streamable HTTP URL 不能为空");
+                if(nativeWindows()) WindowsExecutionTools.validateRemoteMcp(runtime.getUrl());
                 server.put("url",runtime.getUrl());
                 ObjectNode headers=server.putObject("http_headers");
                 if(runtime.getHttpHeaders()!=null) runtime.getHttpHeaders().forEach(headers::put);
@@ -518,6 +560,7 @@ public class AppServerCodexAdapter implements CodexGateway {
     public void interruptTurn(String threadId, String turnId) {
         requireText(threadId, "Codex thread ID");
         requireText(turnId, "Codex turn ID");
+        cancelledNativeTurns.add(turnId);stopNativeCommand(turnId);
         ObjectNode params = objectMapper.createObjectNode();
         params.put("threadId", threadId);
         params.put("turnId", turnId);
@@ -526,11 +569,14 @@ public class AppServerCodexAdapter implements CodexGateway {
 
     @Override
     public void resolveApproval(String requestId, ApprovalDecision decision) {
+        resolveApproval(requestId,decision,null);
+    }
+    @Override public void resolveApproval(String requestId, ApprovalDecision decision, JsonNode suppliedAnswers) {
         requireText(requestId, "Approval request ID");
         if (decision == null) {
             throw new CodexException("Approval decision is required");
         }
-        PendingApproval approval = pendingApprovals.remove(requestId);
+        PendingApproval approval = pendingApprovals.get(requestId);
         if (approval == null) {
             throw new CodexException("Unknown or already resolved approval request: " + requestId);
         }
@@ -538,9 +584,20 @@ public class AppServerCodexAdapter implements CodexGateway {
         response.put("jsonrpc", "2.0");
         response.set("id", approval.jsonRpcId);
         ObjectNode result = response.putObject("result");
-        if(approval.type==ApprovalType.MCP_TOOL_CALL) writeToolInputDecision(result,approval.params,decision);
+        if(decision==ApprovalDecision.ACCEPT_FOR_SESSION) throw new CodexException("审批仅支持本次决定");
+        if(approval.type==ApprovalType.EXECUTION_CONFIRMATION) ExecutionConfirmation.answer(result,decision);
+        else if(approval.type==ApprovalType.MCP_TOOL_CALL) {
+            if(decision==ApprovalDecision.ACCEPT) result.set("answers",ToolQuestionAnswers.validate(approval.params,suppliedAnswers));
+            else {
+                ObjectNode empty=result.putObject("answers");
+                for(JsonNode question:approval.params.path("questions")) empty.putObject(requiredText(question,"id","question")).putArray("answers");
+            }
+        }
         else result.put("decision", toCodexDecision(decision));
+        if(!pendingApprovals.remove(requestId,approval)) throw new CodexException("审批已处理或失效");
         write(response);
+        if(decision==ApprovalDecision.CANCEL && (approval.type==ApprovalType.EXECUTION_CONFIRMATION || approval.type==ApprovalType.MCP_TOOL_CALL))
+            interruptTurn(requiredText(approval.params,"threadId","approval"),requiredText(approval.params,"turnId","approval"));
     }
 
     JsonNode request(String method, JsonNode params) {
@@ -723,22 +780,38 @@ public class AppServerCodexAdapter implements CodexGateway {
     }
 
     private void handleServerRequest(JsonNode id, String method, JsonNode params) {
+        if("item/tool/call".equals(method) && nativeWindows()) {
+            handleNativeCommand(id,params);return;
+        }
         ApprovalType type;
         if ("item/commandExecution/requestApproval".equals(method)) {
             type = ApprovalType.COMMAND_EXECUTION;
         } else if ("item/fileChange/requestApproval".equals(method)) {
             type = ApprovalType.FILE_CHANGE;
         } else if ("item/tool/requestUserInput".equals(method)) {
-            type = ApprovalType.MCP_TOOL_CALL;
+            type = ExecutionConfirmation.isConfirmation(params) ? ApprovalType.EXECUTION_CONFIRMATION : ApprovalType.MCP_TOOL_CALL;
         } else {
             sendUnsupportedRequest(id, method);
             return;
         }
-        if (properties.isStrictProjectIsolation() && type!=ApprovalType.MCP_TOOL_CALL) {
+        if(type==ApprovalType.EXECUTION_CONFIRMATION) {
+            try { ExecutionConfirmation.validate(params); }
+            catch(CodexException failure) {sendErrorResponse(id,-32602,failure.getMessage());return;}
+        }
+        if (properties.isStrictProjectIsolation() && (type==ApprovalType.COMMAND_EXECUTION || type==ApprovalType.FILE_CHANGE)) {
             ObjectNode response=objectMapper.createObjectNode();
             response.put("jsonrpc","2.0"); response.set("id",id.deepCopy());
             response.putObject("result").put("decision","decline");
             write(response);
+            CodexEventListener target=listener(params);
+            if(target!=null) {
+                ObjectNode blocked=objectMapper.createObjectNode().put("type","approvalBlocked")
+                        .put("approvalType",type.name()).put("policyCode","STRICT_PROJECT_ISOLATION")
+                        .put("message","平台策略已拦截此请求：严格项目隔离禁止通过命令或文件审批扩大执行权限。此决定由平台作出，并非用户拒绝。")
+                        .put("guidance","如需用户确认项目内操作，请使用执行前确认；批准后仍须遵守原有项目权限。");
+                blocked.set("operation",params.deepCopy());
+                target.onEvent(new CodexEvent(TurnEventType.WARNING,"policy-blocked-"+java.util.UUID.randomUUID(),blocked.toString(),blocked));
+            }
             LOGGER.warn("Declined unexpected approval request in strict project isolation mode: {}",method);
             return;
         }
@@ -757,9 +830,55 @@ public class AppServerCodexAdapter implements CodexGateway {
         listener.onApproval(new CodexApproval(requestId, type, params.deepCopy()));
     }
 
+    private void handleNativeCommand(JsonNode id,JsonNode params) {
+        String threadId=params.path("threadId").asText();String turnId=params.path("turnId").asText();
+        Path workspace=threadWorkspaces.get(threadId);
+        String tool=params.path("tool").asText();
+        if(!List.of(WindowsExecutionTools.NAME,WorkspacePatchTool.NAME,WorkspaceImageTool.NAME,WorkspaceImageGenerationTool.NAME,WindowsCommandTool.NAME).contains(tool) || workspace==null || listener(params)==null || turnId.isBlank() || cancelledNativeTurns.contains(turnId)) {
+            sendErrorResponse(id,-32602,"Unknown isolated command or inactive turn");return;
+        }
+        Thread worker=Thread.ofVirtual().unstarted(()-> {
+            ObjectNode response=objectMapper.createObjectNode().put("jsonrpc","2.0");response.set("id",id.deepCopy());
+            ObjectNode result=response.putObject("result");String output=null;
+            try {
+                if(WindowsCommandTool.NAME.equals(tool)) {
+                    var execution=WindowsCommandTool.execute(workspace,properties,params.path("arguments"),objectMapper);
+                    result.put("success",execution.exitCode()==0);output="Exit code: "+execution.exitCode()+"\n"+execution.output();
+                } else if(WorkspaceImageGenerationTool.NAME.equals(tool)) {
+                    if(!controlledImages())throw new CodexException("当前模型未接通图片生成服务");
+                    result.setAll(WorkspaceImageGenerationTool.generate(workspace,params.path("arguments"),objectMapper,
+                            (payload,edit)->historyProxy.generateControlledImage(payload,edit,turnId)));
+                } else if(WorkspaceImageTool.NAME.equals(tool)) {
+                    if(!imageInputThreads.contains(threadId))throw new CodexException("当前模型未配置图片输入能力");
+                    result.setAll(WorkspaceImageTool.view(workspace,WindowsExecutionTools.textArgument(params.path("arguments"),"path",2048),objectMapper));
+                } else if(WorkspacePatchTool.NAME.equals(tool)) {
+                    output=WorkspacePatchTool.apply(workspace,WindowsExecutionTools.textArgument(params.path("arguments"),"patch",131072));result.put("success",true);
+                } else {
+                    var execution=WindowsExecutionTools.execute(workspace,properties.getWindowsPython(),params.path("arguments"));
+                    result.put("success",execution.exitCode()==0);output="Exit code: "+execution.exitCode()+"\n"+execution.output();
+                }
+            } catch(Exception failure) {result.put("success",false);output=CodexDiagnostics.redact(failure.getMessage());}
+            finally {nativeCommands.remove(turnId,Thread.currentThread());}
+            if(output!=null)result.putArray("contentItems").addObject().put("type","inputText").put("text",output);
+            if(!closing) write(response);
+        });
+        if(nativeCommands.putIfAbsent(turnId,worker)!=null) {sendErrorResponse(id,-32602,"Only one isolated command may run per turn");return;}
+        worker.start();
+    }
+
+    private void stopNativeCommand(String turnId) {
+        Thread worker=nativeCommands.get(turnId);
+        if(worker==null || worker==Thread.currentThread()) return;
+        worker.interrupt();
+        try {worker.join(5000);} catch(InterruptedException failure) {Thread.currentThread().interrupt();throw new CodexException("Interrupted while stopping isolated command",failure);}
+        if(worker.isAlive()) throw new CodexException("Cannot confirm isolated command termination");
+    }
+
     private void handleNotification(String method, JsonNode params) {
         if ("turn/completed".equals(method)) {
             String turnId = params.path("turn").path("id").asText(null);
+            if(turnId!=null) {cancelledNativeTurns.add(turnId);stopNativeCommand(turnId);}
+            if(turnId!=null) pendingApprovals.entrySet().removeIf(entry -> turnId.equals(entry.getValue().params.path("turnId").asText()));
             String status = params.path("turn").path("status").asText("failed");
             String reason = params.path("turn").path("error").path("message").asText(null);
             CodexEventListener listener = turnId == null ? listener(params) : listenersByTurn.remove(turnId);
@@ -770,6 +889,7 @@ public class AppServerCodexAdapter implements CodexGateway {
             if (threadId != null && listener != null) {
                 listenersByThread.remove(threadId, listener);
             }
+            if(turnId!=null) cancelledNativeTurns.remove(turnId);
             return;
         }
         if ("error".equals(method)) {
@@ -810,7 +930,7 @@ public class AppServerCodexAdapter implements CodexGateway {
             return event(TurnEventType.WARNING, null, params.path("message").asText(), params);
         }
         if ("item/started".equals(method) || "item/completed".equals(method)) {
-            JsonNode item = params.path("item");
+            JsonNode item = WindowsExecutionTools.eventSummary(params.path("item"),objectMapper);
             String type = item.path("type").asText();
             boolean started = "item/started".equals(method);
             String eventItemId = item.path("id").asText(null);
@@ -903,6 +1023,8 @@ public class AppServerCodexAdapter implements CodexGateway {
     @PreDestroy
     public synchronized void close() {
         closing = true;
+        for(String turnId:nativeCommands.keySet()) {cancelledNativeTurns.add(turnId);stopNativeCommand(turnId);}
+        cancelledNativeTurns.clear();
         Process current = process;
         writer = null;
         stopProcessTree(current);
@@ -976,33 +1098,6 @@ public class AppServerCodexAdapter implements CodexGateway {
             case CANCEL: return "cancel";
             default: throw new CodexException("Unsupported approval decision: " + decision);
         }
-    }
-
-    private void writeToolInputDecision(ObjectNode result,JsonNode params,ApprovalDecision decision) {
-        ObjectNode answers=result.putObject("answers");
-        JsonNode questions=params.path("questions");
-        if(!questions.isArray() || questions.isEmpty()) throw new CodexException("MCP approval request has no questions");
-        for(JsonNode question:questions) {
-            String id=requiredText(question,"id","MCP approval question");
-            String answer=approvalOption(question.path("options"),decision);
-            answers.putObject(id).putArray("answers").add(answer);
-        }
-    }
-
-    private String approvalOption(JsonNode options,ApprovalDecision decision) {
-        if(!options.isArray() || options.isEmpty()) throw new CodexException("MCP approval question has no selectable options");
-        String[] preferred=switch(decision) {
-            case ACCEPT -> new String[]{"accept","approve","allow","yes"};
-            case ACCEPT_FOR_SESSION -> new String[]{"session","always","remember"};
-            case DECLINE -> new String[]{"decline","deny","reject","no"};
-            case CANCEL -> new String[]{"cancel","stop","abort"};
-        };
-        for(String term:preferred) for(JsonNode option:options) {
-            String label=option.path("label").asText();
-            if(label.toLowerCase(java.util.Locale.ROOT).contains(term)) return label;
-        }
-        if(decision==ApprovalDecision.ACCEPT_FOR_SESSION) return approvalOption(options,ApprovalDecision.ACCEPT);
-        throw new CodexException("MCP approval request does not offer the selected decision");
     }
 
     private String requiredText(JsonNode node, String field, String source) {

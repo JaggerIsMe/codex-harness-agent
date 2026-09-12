@@ -25,6 +25,30 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ImageGenerationTransportTest {
+    @Test void controlledImagesReuseOnlyCurrentCodexHeadersAndNeverFollowRedirects() throws Exception {
+        var imageCalls=new AtomicInteger();var received=new AtomicReference<JsonNode>();var receivedAuth=new AtomicReference<String>();
+        var status=new AtomicInteger(200);var server=HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);
+        server.createContext("/responses",exchange->{
+            exchange.getRequestBody().readAllBytes();byte[] body="{\"output\":[]}".getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type","application/json");exchange.sendResponseHeaders(200,body.length);exchange.getResponseBody().write(body);exchange.close();
+        });
+        server.createContext("/images/generations",exchange->{
+            imageCalls.incrementAndGet();receivedAuth.set(exchange.getRequestHeaders().getFirst("Authorization"));
+            received.set(json.readTree(exchange.getRequestBody()));byte[] body="{\"data\":[{\"b64_json\":\"aW1hZ2U=\"}]}".getBytes(StandardCharsets.UTF_8);
+            if(status.get()==307)exchange.getResponseHeaders().set("Location","http://127.0.0.1:"+server.getAddress().getPort()+"/forbidden");
+            exchange.sendResponseHeaders(status.get(),body.length);exchange.getResponseBody().write(body);exchange.close();
+        });server.start();
+        try(var proxy=new ResponsesCompatibilityProxy(data,workspace,"http://127.0.0.1:"+server.getAddress().getPort(),"fixture",json,false,true);
+            var client=HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build()) {
+            proxy.bind(UUID.randomUUID().toString());var payload=json.createObjectNode().put("prompt","fixture").put("model","gpt-image-2");
+            assertThrows(CodexException.class,()->proxy.generateControlledImage(payload,false,"fixture-turn"));
+            assertEquals(200,client.send(request(proxy.baseUrl()+"/responses","{\"input\":[]}".getBytes(StandardCharsets.UTF_8)).build(),HttpResponse.BodyHandlers.ofString()).statusCode());
+            assertArrayEquals("image".getBytes(StandardCharsets.UTF_8),proxy.generateControlledImage(payload,false,"fixture-turn"));
+            assertEquals("Bearer synthetic-native-token",receivedAuth.get());assertEquals("fixture",received.get().path("prompt").asText());
+            status.set(307);assertThrows(CodexException.class,()->proxy.generateControlledImage(payload,false,"fixture-turn"));
+            assertEquals(2,imageCalls.get());assertFalse(proxy.diagnostics().contains("synthetic-native-token"));
+        }finally{server.stop(0);}
+    }
     @TempDir Path data;
     @TempDir Path workspace;
     private final ObjectMapper json = new ObjectMapper();
