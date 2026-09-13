@@ -1,5 +1,7 @@
 # Harness Agent
 
+[项目文档总目录](../../docs/README.md) · [设备与执行环境](../../docs/modules/devices-agent.md) · [当前架构](../../docs/architecture/overview.md)
+
 Harness Agent 通过主动 WSS 连接接受 Harness Server 指令，并在项目专用执行环境中驱动 `codex app-server`。
 
 支持现有 Windows 上直接运行 Agent，通过 LPAC 隔离模型代码，不需要虚拟机。运行时配置和兼容性见 [Windows 原生隔离](../../docs/windows-agent-isolation.md)。[Linux 容器/虚拟机](../../docs/linux-agent-isolation.md) 是另一个部署选项，当前开发环境尚未完成 Linux 实机验收。

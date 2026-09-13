@@ -12,7 +12,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class WorkspaceExecutionCoordinator {
     private final Map<Path,State> states=new HashMap<>();
     private static final class State {int readers;String mutation;boolean unknown;}
-    public synchronized Lease enterTurn(Path root) {return acquire(root,null);}
+    // All current Turns can write. Hold the exclusive lease through approval and confirmed termination.
+    public synchronized Lease enterTurn(Path root) {return acquire(root,"turn-"+java.util.UUID.randomUUID());}
     public synchronized Lease enterRead(Path root) {return acquire(root,null);}
     public synchronized Lease enterMutation(Path root,String operationId) {return acquire(root,operationId);}
     private Lease acquire(Path root,String operationId) {

@@ -20,7 +20,10 @@ harness:
     enrollment-code: ENR-CEXG-EPUW
     device-name: jagger-device
     data-dir: ${project.folder}/.my-harness-agent
-    max-concurrent-turns: 1
+    # 设备级活动 Turn 上限，包含等待审批的 Turn；修改后需重启 Agent。
+    # 多 Expert 编排由中台调度独立 Conversation，原生 multi_agent 继续由受控工具策略关闭。
+    # 当前可写 Turn 在同 Workspace 内互斥；不同 Workspace 可并发，编排调度额度由中台配置。
+    max-concurrent-turns: 4
     workspace-archive-max-files: 100
     workspace-archive-max-total-bytes: 104857600
     workspace-archive-max-output-bytes: 115343360
