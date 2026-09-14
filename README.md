@@ -4,24 +4,26 @@
 
 Harness Agent 通过主动 WSS 连接接受 Harness Server 指令，并在项目专用执行环境中驱动 `codex app-server`。
 
-支持现有 Windows 上直接运行 Agent，通过 LPAC 隔离模型代码，不需要虚拟机。运行时配置和兼容性见 [Windows 原生隔离](../../docs/windows-agent-isolation.md)。[Linux 容器/虚拟机](../../docs/linux-agent-isolation.md) 是另一个部署选项，当前开发环境尚未完成 Linux 实机验收。
+首版正式交付范围已确定为 **Windows 桌面安装包 + Linux 独立服务器安装包**，共用 Java Agent 核心；Linux 一台独立服务器运行一个 Agent、注册一个 Device，由 systemd 管理，允许在已授权父目录下创建多个 Project，每个项目独占 Workspace，与 Windows 项目组织一致。两类安装包尚未实现，Linux 多项目实机隔离验收尚未完成；范围与实施要求见 [首版交付方案](../../docs/agent-distribution-v1.md)。
+
+现有 Windows Java 进程通过 LPAC 隔离模型代码，运行时配置和兼容性见 [Windows 原生隔离](../../docs/windows-agent-isolation.md)，Linux 策略与待验收项见 [Linux 隔离说明](../../docs/linux-agent-isolation.md)。旧 Docker 部署文件已移除；下文 Jar 命令是开发入口，不代表正式安装包已经交付。
 
 图片查看、本机 Codex 生图、补丁编辑和结构化命令通过受控工具恢复，原生工具开关仍关闭。新增工具需要升级 Agent 后新建会话；第三方生图、Maven 和多 Agent 的当前限制见 [受控工具恢复与验证](../../docs/controlled-windows-tools.md)。
 
 ## 权限与执行
 
-- Java 21、Maven 3.6.3+；容器镜像固定 Codex 0.153.0。
+- Java 21、Maven 3.6.3+；Codex 版本与平台验证范围见下方隔离约束。
 - Linux 每个 Thread 使用独立 named permission profile；Windows 关闭原生本地执行工具，通过独立 Python 运行时和 LPAC 执行。只读运行时与当前 Workspace 为授权范围，命令禁网，不继承 Agent 凭证环境变量；元数据目录移除继承写授权并设置只读权限。
 - Agent 在注册前进行真实访问自检，Windows 通过后上报 `WINDOWS_LPAC_V1`，Linux 通过后上报 `LINUX_PROJECT_PROFILE_V1`；失败停止启动。
 - Server 同时支持上述 Windows 和 Linux 能力，不再将旧 `WINDOWS_PROJECT_PROFILE` 视为读取隔离。Windows 当前固定验证 Codex 0.153.0，需要配置 `windows-python` 专用运行时。
-- 容器配置的 `max-workspaces=1` 保证独占分配，重启和相同请求重试不会创建第二个项目。裸 Linux 虚拟机部署也应为每个项目使用独立 Agent、工作目录和操作系统边界。
+- Linux 首版允许一个 Agent 下的多个项目工作区，原生安装包采用核心现有默认 `max-workspaces=0`（不设数量上限），可配置大于 1 的容量上限；该配置约束项目工作区总数，不是父目录数量或 Turn 并发数。每个项目独占 Workspace，重启和重试须保留原归属；安装包配置与多项目隔离验收仍待完成。
 - 每个会话有独立 App Server 进程，恢复时校验持久化 Thread 的 Workspace 归属；支持流式事件、中断和幂等重试。
 
-容器入口使用独立的 `deploy/application-container.yml`，不会加载源码中的旧 Windows 开发配置。`deploy/compose.yml` 不挂载宿主机私人目录或 Docker socket，不使用 privileged；如果内核或运行时阻止 sandbox，应配置受支持环境，不得绕过自检。
+`deploy/` 仅保留 Windows 运行时与工具链准备脚本。原生安装包需提供独立于源码 Windows 开发配置的部署配置；如果目标系统阻止 sandbox，应配置受支持环境，不得绕过自检。
 
 ## 注册与状态
 
-按部署文档设置 `HARNESS_SERVER_URL`、`HARNESS_ENROLLMENT_URL`、`HARNESS_ENROLLMENT_CODE` 与可选的 `HARNESS_DEVICE_NAME`。远程地址必须使用 WSS/HTTPS。首次注册取得的 Device 身份保存在容器专用 Agent 状态卷；每个容器使用不同注册码和 Compose project name。
+部署需配置中台连接地址、Enrollment 地址、一次性注册码和可选设备名称，远程地址必须使用 WSS/HTTPS。首次注册取得的 Device 身份保存在该实例独占的 Agent 数据目录，重启和升级继续使用原身份；正式安装包的配置入口按首版交付方案实施。
 
 平台为 Device 分配运行模型及对应用户后即可创建 Project。升级 Windows LPAC 后，原 Project 和文件保留，旧 Conversation 只保留历史，需要在原项目中新建会话使用新工具；新模式创建的会话可正常恢复。详见 [ADR 0018](../../docs/adr/0018-linux-project-read-isolation.md)。
 

@@ -1,7 +1,0 @@
-*
-!pom.xml
-!src/
-!src/**
-!deploy/
-!deploy/application-container.yml
-!Dockerfile
