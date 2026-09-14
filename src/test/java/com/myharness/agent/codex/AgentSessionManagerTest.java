@@ -27,6 +27,47 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class AgentSessionManagerTest {
+    @Test void nodeReceiptAndOriginalFileBaselineSurviveContinuationWithoutChangingUserInput() throws Exception {
+        try(var forwarding=new ConversationCodexGateway(()->gateway)) {
+        manager=new AgentSessionManager(forwarding,registry,eventBus,properties,attachmentService(),org.mockito.Mockito.mock(ExpertSkillPreparation.class));
+        manager.startThread(thread("3"));
+        var first=expertTurn("7","a","codex-thread-1",null);
+        var json=new ObjectMapper();first.setOrchestration(json.readTree("{\"protocol\":1,\"outputs\":[{\"path\":\"report.txt\"}]}"));
+        manager.startTurn(first);
+        assertEquals("do work",gateway.lastInput.getMessage());
+        org.junit.jupiter.api.Assertions.assertTrue(gateway.lastInput.isOrchestration());
+        gateway.listener.onNodeOutcome(json.readTree("{\"state\":\"WAITING_USER\",\"summary\":\"请指定店铺\"}"));
+        gateway.listener.onCompleted("codex-turn-1","completed",null);
+        var receipt=((com.myharness.agent.entity.dto.TurnTerminalEventDTO)events.getLast().getPayload()).getOrchestration();
+        assertEquals("WAITING_USER",receipt.path("state").asText());
+        assertEquals("MISSING",receipt.path("files").get(0).path("before").asText());
+        var next=expertTurn("8","a","codex-thread-2","a");next.setMessage("美国主店");
+        next.setOrchestration(json.readTree("{\"protocol\":1,\"outputs\":[{\"path\":\"report.txt\",\"before\":\"MISSING\"}]}"));
+        manager.startTurn(next);assertEquals("codex-thread-2",gateway.startedTurnThreadId);assertEquals("美国主店",gateway.lastInput.getMessage());
+        Files.writeString(registry.resolve("demo","report.txt"),"report data");
+        gateway.listener.onNodeOutcome(json.readTree("{\"state\":\"COMPLETE\",\"summary\":\"报告已生成\"}"));
+        gateway.listener.onCompleted("codex-turn-1","completed",null);
+        var completed=((com.myharness.agent.entity.dto.TurnTerminalEventDTO)events.getLast().getPayload()).getOrchestration();
+        assertEquals("COMPLETE",completed.path("state").asText());
+        assertEquals("MISSING",completed.path("files").get(0).path("before").asText());
+        org.junit.jupiter.api.Assertions.assertTrue(completed.path("files").get(0).path("after").asText().matches("[0-9a-f]{64}"));
+        assertEquals(0,manager.activeTurnCount());
+        }
+    }
+    @Test void missingNodeDeclarationIsAProtocolProblemNotAUserQuestion() throws Exception {
+        manager.startThread(thread("3"));var command=expertTurn("7","a","codex-thread-1",null);
+        command.setOrchestration(new ObjectMapper().readTree("{\"protocol\":1,\"outputs\":[]}"));
+        manager.startTurn(command);gateway.listener.onCompleted("codex-turn-1","completed",null);
+        assertEquals("MISSING",((com.myharness.agent.entity.dto.TurnTerminalEventDTO)events.getLast().getPayload()).getOrchestration().path("state").asText());
+    }
+    @Test void missingInputFilePausesBeforeCallingCodex() throws Exception {
+        manager.startThread(thread("3"));var command=expertTurn("7","a","codex-thread-1",null);
+        command.setOrchestration(new ObjectMapper().readTree("{\"protocol\":1,\"outputs\":[],\"inputs\":[{\"path\":\"missing.xlsx\"}]}"));
+        var event=manager.startTurn(command);
+        assertEquals(AgentEventType.TURN_COMPLETED,event.getType());
+        assertEquals("WAITING_USER",((com.myharness.agent.entity.dto.TurnTerminalEventDTO)event.getPayload()).getOrchestration().path("state").asText());
+        org.junit.jupiter.api.Assertions.assertNull(gateway.lastInput);assertEquals(0,manager.activeTurnCount());
+    }
     @Test void forwardsFrozenExpertAndExplicitClearOnConsecutiveTurns() {
         manager.startThread(thread("3"));
         var first=turn("3","7");var expert=new com.myharness.agent.entity.dto.ExpertRuntimeDTO();

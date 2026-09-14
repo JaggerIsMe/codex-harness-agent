@@ -28,10 +28,12 @@ class ExecutionConfirmationSmokeTest {
         var json=new ObjectMapper();var nextConfirmation=new AtomicBoolean(true);
         var cancelMode=new AtomicBoolean(false);
         var continuedInput=new AtomicReference<String>();
+        var advertisedTools=new java.util.concurrent.LinkedBlockingQueue<String>();
         var provider=com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);
         provider.createContext("/responses",exchange -> {
             String input=new String(exchange.getRequestBody().readAllBytes(),StandardCharsets.UTF_8);
             boolean confirm=nextConfirmation.getAndSet(false);
+            if(confirm) advertisedTools.add(json.readTree(input).path("tools").toString());
             ObjectNode item=json.createObjectNode().put("id",confirm?"fc-confirm":"msg-confirm").put("status","completed");
             if(confirm) {
                 item.put("type","function_call").put("name","request_user_input").put("call_id","call-confirm");
@@ -68,14 +70,32 @@ class ExecutionConfirmationSmokeTest {
             for(var decision:List.of(ApprovalDecision.ACCEPT,ApprovalDecision.DECLINE,ApprovalDecision.CANCEL)) {
                 nextConfirmation.set(true);continuedInput.set(null);
                 cancelMode.set(decision==ApprovalDecision.CANCEL);
-                try(var adapter=new AppServerCodexAdapter(properties,json)) {
+                try(var adapter=new AppServerCodexAdapter(properties,json) {
+                    @Override Path startupModelCatalog() {
+                        Path path=super.startupModelCatalog();
+                        try {
+                            var catalog=json.readTree(path.toFile());
+                            ((ObjectNode)catalog.path("models").get(0)).putArray("experimental_supported_tools")
+                                    .add("send_user_message_async").add("clock");
+                            if(choice)((ObjectNode)catalog.path("models").get(0)).put("tool_mode","code_mode_only");
+                            json.writeValue(path.toFile(),catalog);
+                            return path;
+                        } catch(java.io.IOException failure) {throw new RuntimeException(failure);}
+                    }
+                }) {
                     if(thread==null) thread=adapter.startThread(options);else adapter.resumeThread(thread,options);
                     var requested=new CompletableFuture<CodexApproval>();var finished=new CompletableFuture<String>();
-                    adapter.startTurn(thread,new CodexTurnInput("请执行测试操作，执行前必须让我确认。").withExpert("Follow Harness confirmation rules.",List.of()),new CodexEventListener() {
+                    var input=new CodexTurnInput("请执行测试操作，执行前必须让我确认。");
+                    if(choice)input=input.withExpert("Follow Harness confirmation rules.",List.of());
+                    adapter.startTurn(thread,input,new CodexEventListener() {
                         public void onEvent(CodexEvent event) { }
                         public void onApproval(CodexApproval approval) { requested.complete(approval); }
                         public void onCompleted(String id,String status,String reason) { finished.complete(status); }
                     });
+                    String tools=advertisedTools.poll(30,TimeUnit.SECONDS);
+                    assertNotNull(tools,"The real runtime must send a tool declaration to the local model");
+                    assertFalse(tools.contains("request_user_input_async"),"Harness must not advertise a question tool that bypasses its waiting/answer protocol");
+                    assertTrue(tools.contains("request_user_input"),"Blocking questions must remain available");
                     var approval=requested.get(30,TimeUnit.SECONDS);
                     assertEquals(choice?ApprovalType.MCP_TOOL_CALL:ApprovalType.EXECUTION_CONFIRMATION,approval.getType());
                     assertFalse(finished.isDone());assertNull(continuedInput.get(),"Model must wait for the decision");

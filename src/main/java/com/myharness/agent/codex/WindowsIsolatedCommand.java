@@ -94,11 +94,23 @@ final class WindowsIsolatedCommand {
                 StringBuilder block=new StringBuilder();environment.forEach((key,value)->block.append(key).append('=').append(value).append('\0'));block.append('\0');
                 try(var env=new Memory((long)block.length()*2)) {
                     env.setWideString(0,block.substring(0,block.length()-1));
-                    return launch(shell,command,workspace,sid.getValue(),env,timeoutSeconds);
+                    return normalizePythonStartup(launch(shell,command,workspace,sid.getValue(),env,timeoutSeconds),runtime);
                 }
             } finally {Security.API.FreeSid(sid.getValue());}
         } catch(CodexException failure) {throw failure;}
         catch(Exception failure) {if(failure instanceof InterruptedException) Thread.currentThread().interrupt();throw new CodexException("Windows isolated command failed",failure);}
+    }
+
+    static Result normalizePythonStartup(Result result,Path runtime) {
+        if(result.exitCode()!=0)return result;
+        // CPython can execute successfully in LPAC while GetFinalPathNameByHandle is denied.
+        // Only remove this exact runtime's leading startup diagnostic. Preserve failed commands,
+        // all later output, and every other warning/error; never widen the token or filesystem ACL.
+        String diagnostic="Failed to find real location of "+runtime;
+        String output=result.output();
+        while(output.startsWith(diagnostic+"\n")||output.startsWith(diagnostic+"\r\n"))
+            output=output.substring(output.indexOf('\n')+1);
+        return new Result(result.exitCode(),output);
     }
 
     private static Result launch(String executable,String command,Path cwd,Pointer sid,Pointer env,int timeout) throws Exception {

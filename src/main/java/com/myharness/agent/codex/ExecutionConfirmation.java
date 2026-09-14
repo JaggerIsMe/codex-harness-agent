@@ -17,10 +17,12 @@ final class ExecutionConfirmation {
             用户拒绝或取消时不得执行该操作、不得通过替代命令绕过决定。不要用命令扩权请求代替执行确认。
             平台拒绝原生命令/文件审批意味着权限策略拦截，不是用户拒绝，必须如实说明。
             普通已授权操作无需逐步确认，只有用户要求或业务确需用户决定时才发起。
+            业务澄清（例如店铺范围、产出方式）也使用 request_user_input 并等待答案；使用业务问题自己的 id 和真实选项，不使用执行前确认的固定选项。未回答不得视为同意或按默认项继续相关操作。
             """;
 
     static void configure(ObjectNode params) {
         params.withObject("config").withObject("features").put("default_mode_request_user_input",true);
+        params.withObject("config").withObject("tools").withObject("experimental_request_user_input").put("enabled",true);
         params.put("developerInstructions",INSTRUCTIONS);
     }
 

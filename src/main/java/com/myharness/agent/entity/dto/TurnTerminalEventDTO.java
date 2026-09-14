@@ -1,6 +1,9 @@
 package com.myharness.agent.entity.dto;
 
 public class TurnTerminalEventDTO {
+    private com.fasterxml.jackson.databind.JsonNode orchestration;
+    public TurnTerminalEventDTO withOrchestration(com.fasterxml.jackson.databind.JsonNode value){orchestration=value;return this;}
+    public com.fasterxml.jackson.databind.JsonNode getOrchestration(){return orchestration;}
     private final String conversationId;
     private final String turnId;
     private final String codexTurnId;

@@ -32,6 +32,7 @@ class WindowsIsolatedCommandTest {
                 """.formatted(new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(outside.toString())),15,
                 Path.of(System.getProperty("windows.isolation.python")));
         assertEquals(0,result.exitCode(),result.output());
+        assertFalse(result.output().contains("Failed to find real location"),result.output());
         assertTrue(result.output().contains("RESULT read=True write=True"),result.output());
         assertEquals("OUTSIDE",Files.readString(outside));
         assertTrue(Files.readString(project.resolve("created.txt")).contains("WRITE_OK"));

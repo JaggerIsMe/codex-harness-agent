@@ -9,6 +9,20 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 class ConversationCodexGatewayTest {
+    @Test void outcomeIsForwardedOnlyToItsLiveTurnAndAcknowledgementFailuresPropagate() {
+        try(var gateway=gateway()) {
+            String id=gateway.startThread(options("a"));var target=mock(CodexEventListener.class);
+            gateway.startTurn(id,new CodexTurnInput("work").withOrchestration(true),target);
+            var report=new com.fasterxml.jackson.databind.ObjectMapper().createObjectNode().put("state","COMPLETE").put("summary","done");
+            var first=processes.getFirst().listener;
+            first.onNodeOutcome(report);verify(target).onNodeOutcome(report);
+            doThrow(new CodexException("Cannot record outcome")).when(target).onNodeOutcome(report);
+            assertThrows(CodexException.class,()->first.onNodeOutcome(report));
+            first.onCompleted("turn","completed",null);
+            gateway.startTurn(id,new CodexTurnInput("next"),mock(CodexEventListener.class));
+            assertThrows(CodexException.class,()->first.onNodeOutcome(report));
+        }
+    }
     @TempDir Path workspace;
     final List<Fake> processes=new ArrayList<>();
     ConversationCodexGateway gateway() {

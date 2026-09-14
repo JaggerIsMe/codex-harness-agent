@@ -104,7 +104,8 @@ class AppServerCodexAdapterTest {
                     org.mockito.Mockito.mock(CodexEventListener.class)));
         }
     }
-    @Test void resolvesAndPinsLocalCodexTargetWhenResumingAnExistingThread(@TempDir Path workspace) {
+    @Test void resolvesAndPinsLocalCodexTargetWhenResumingAnExistingThread(@TempDir Path workspace) throws Exception {
+        Path localCatalog=java.nio.file.Files.writeString(workspace.resolve("fixture-models.json"),"{\"models\":[{\"slug\":\"gpt-local\"}]}");
         var mapper=new ObjectMapper();var methods=new ArrayList<String>();var requests=new ArrayList<JsonNode>();
         var adapter=new AppServerCodexAdapter(new AgentProperties(),mapper) {
             @Override JsonNode request(String method,JsonNode input) {
@@ -112,7 +113,7 @@ class AppServerCodexAdapterTest {
                 if("thread/read".equals(method)) {
                     result.putObject("thread").put("id","thread-local").put("cwd",workspace.toString()).putObject("status").put("type","notLoaded");
                 } else if("config/read".equals(method)) {
-                    result.putObject("config").put("model_provider","openai").put("model","gpt-local");
+                    result.putObject("config").put("model_provider","openai").put("model","gpt-local").put("model_catalog_json",localCatalog.toString());
                 } else if("model/list".equals(method)) {
                     result.putArray("data").addObject().put("model","gpt-local").put("isDefault",true);
                 } else if("thread/resume".equals(method)) {

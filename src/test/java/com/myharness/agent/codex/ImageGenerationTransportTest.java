@@ -166,6 +166,7 @@ class ImageGenerationTransportTest {
     @ParameterizedTest
     @ValueSource(strings = {"openai", "custom", "harness_managed"})
     void resumedRuntimeEnablesImagesOnlyForLocalBuiltInOpenAi(String provider) throws Exception {
+        Path catalog=java.nio.file.Files.writeString(data.resolve("local-models.json"),"{\"models\":[{\"slug\":\"fixture-model\"}]}");
         var calls = new AtomicInteger();
         var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/codex/images/generations", exchange -> {
@@ -190,6 +191,7 @@ class ImageGenerationTransportTest {
                 switch (method) {
                     case "config/read" -> {
                         var config = result.putObject("config").put("model_provider", provider).put("model", "fixture-model").put("openai_base_url", upstream);
+                        config.put("model_catalog_json",catalog.toString());
                         config.putObject("model_providers").putObject(provider).put("name", "fixture").put("base_url", upstream)
                                 .put("supports_standalone_web_search", true);
                     }

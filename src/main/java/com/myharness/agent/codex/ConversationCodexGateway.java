@@ -19,9 +19,12 @@ public class ConversationCodexGateway implements CodexGateway {
     private final ScheduledExecutorService reaper=Executors.newSingleThreadScheduledExecutor(r->{
         Thread thread=new Thread(r,"codex-runtime-reaper");thread.setDaemon(true);return thread;
     });
-    @Autowired
     public ConversationCodexGateway(AgentProperties properties,ObjectMapper mapper) {
         this(()->new AppServerCodexAdapter(properties,mapper));
+    }
+    @Autowired
+    public ConversationCodexGateway(AgentProperties properties,ObjectMapper mapper,com.myharness.agent.usage.ManagedUsageClient usage) {
+        this(()->new AppServerCodexAdapter(properties,mapper).withUsageClient(usage));
     }
     ConversationCodexGateway(Supplier<CodexGateway> factory) {
         this.factory=factory;
@@ -77,6 +80,12 @@ public class ConversationCodexGateway implements CodexGateway {
         }
         var terminal=new java.util.concurrent.atomic.AtomicBoolean();
         CodexEventListener forwarding=new CodexEventListener() {
+            @Override public void onNodeOutcome(com.fasterxml.jackson.databind.JsonNode outcome) {
+                synchronized(terminal) {
+                    if(terminal.get())throw new CodexException("Node outcome belongs to a finished Turn");
+                    listener.onNodeOutcome(outcome);
+                }
+            }
             @Override public void onEvent(CodexEvent event) {if(!terminal.get()) listener.onEvent(event);}
             @Override public void onApproval(CodexApproval approval) {
                 if(terminal.get()) return;
@@ -85,9 +94,11 @@ public class ConversationCodexGateway implements CodexGateway {
                 listener.onApproval(new CodexApproval(token,approval.getType(),approval.getDetails()));
             }
             @Override public void onCompleted(String turnId,String status,String reason) {
+                synchronized(terminal) {
                 if(terminal.compareAndSet(false,true)) {
                     approvals.entrySet().removeIf(value -> value.getValue().entry==entry);
                     idle(entry);listener.onCompleted(turnId,status,reason);
+                }
                 }
             }
         };

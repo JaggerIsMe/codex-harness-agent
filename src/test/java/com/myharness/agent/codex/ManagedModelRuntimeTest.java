@@ -25,6 +25,20 @@ import static org.junit.jupiter.api.Assertions.*;
 class ManagedModelRuntimeTest {
     @TempDir Path workspace;
 
+    @Test void meteredTextModelDoesNotAdvertiseUnpricedBuiltInTools() {
+        var json=new ObjectMapper();var params=json.createObjectNode();
+        params.putObject("config").put("web_search","live").putObject("features").put("image_generation",true);
+        var managed=runtime("a","fixture-key");managed.setSchemaVersion(3);
+        try(var adapter=new AppServerCodexAdapter(new AgentProperties(),json)) {
+            adapter.configureModelProvider(params,new CodexThreadOptions("project",workspace,managed));
+            assertEquals("disabled",params.path("config").path("web_search").asText());
+            assertFalse(params.path("config").path("features").path("image_generation").asBoolean());
+            var local=json.createObjectNode();local.putObject("config").put("web_search","live");
+            adapter.configureModelProvider(local,new CodexThreadOptions("project",workspace,localRuntime()));
+            assertEquals("live",local.path("config").path("web_search").asText());
+        }
+    }
+
     @Test void writesResponsesProviderWithoutEmbeddingTheSecret() {
         ObjectMapper json=new ObjectMapper();ObjectNode params=json.createObjectNode();
         AppServerCodexAdapter adapter=new AppServerCodexAdapter(new com.myharness.agent.config.AgentProperties(),json);
@@ -74,6 +88,7 @@ class ManagedModelRuntimeTest {
     @EnabledOnOs(OS.WINDOWS)
     void repeatedSwitchesUseFreshProcessesWithoutManagedCredentialsOrCatalogInLocalCodex() throws Exception {
         Path recording=workspace.resolve("app-server-recording.jsonl");
+        Files.writeString(workspace.resolve("local-models.json"),"{\"models\":[{\"slug\":\"gpt-local\",\"experimental_supported_tools\":[\"send_user_message_async\"]}]}");
         Path arguments=workspace.resolve("fake-app-server.args");
         String classpath=System.getProperty("surefire.test.class.path",System.getProperty("java.class.path"));
         Files.writeString(arguments,"-cp\n"+javaArgument(classpath)+"\n"+FixtureAppServer.class.getName()+"\n"
@@ -96,13 +111,15 @@ class ManagedModelRuntimeTest {
             List<JsonNode> records=new ArrayList<>();
             for(String line:Files.readAllLines(recording)) records.add(mapper.readTree(line));
             var startups=records.stream().filter(value->"startup".equals(value.path("type").asText())).toList();
-            assertEquals(4,startups.size());
-            assertEquals(4,startups.stream().map(value->value.path("pid").asLong()).distinct().count());
+            assertEquals(6,startups.size()); // Each Local Codex switch discovers metadata, then loads the private catalog.
+            assertEquals(6,startups.stream().map(value->value.path("pid").asLong()).distinct().count());
             for(int index=0;index<startups.size();index++) {
-                JsonNode startup=startups.get(index);boolean managed=index%2==0;
+                JsonNode startup=startups.get(index);boolean managed=index==0||index==3;
                 assertEquals(managed,startup.path("managedCredentialPresent").asBoolean());
                 assertEquals(managed,startup.path("managedCatalogPresent").asBoolean());
-                if(index<3) assertFalse(ProcessHandle.of(startup.path("pid").asLong()).map(ProcessHandle::isAlive).orElse(false));
+                assertEquals(index!=1&&index!=4,startup.path("catalogPresent").asBoolean());
+                assertFalse(startup.path("asyncQuestionPresent").asBoolean());
+                if(index<startups.size()-1) assertFalse(ProcessHandle.of(startup.path("pid").asLong()).map(ProcessHandle::isAlive).orElse(false));
             }
             var activations=records.stream().filter(value->"thread/start".equals(value.path("method").asText())
                     || "thread/resume".equals(value.path("method").asText())).toList();
@@ -124,10 +141,12 @@ class ManagedModelRuntimeTest {
     public static final class FixtureAppServer {
         public static void main(String[] args) throws Exception {
             Path recording=Path.of(args[0]);String cwd=args[1];ObjectMapper mapper=new ObjectMapper();
-            boolean catalog=java.util.Arrays.stream(args).anyMatch(value->value.startsWith("model_catalog_json="));
+            String catalogArgument=java.util.Arrays.stream(args).filter(value->value.startsWith("model_catalog_json=")).findFirst().orElse(null);
+            JsonNode catalog=catalogArgument==null?mapper.createObjectNode():mapper.readTree(Path.of(catalogArgument.substring("model_catalog_json=".length()).replace("\"","")).toFile());
             append(recording,mapper.createObjectNode().put("type","startup").put("pid",ProcessHandle.current().pid())
                     .put("managedCredentialPresent",System.getenv().containsKey("HARNESS_MODEL_API_KEY"))
-                    .put("managedCatalogPresent",catalog));
+                    .put("catalogPresent",catalogArgument!=null).put("asyncQuestionPresent",catalog.toString().contains("send_user_message_async"))
+                    .put("managedCatalogPresent","DeepSeek-V4-Flash-Vision-Exp".equals(catalog.path("models").path(0).path("slug").asText())));
             try(var input=new BufferedReader(new InputStreamReader(System.in,StandardCharsets.UTF_8))) {
                 String line;
                 while((line=input.readLine())!=null) {
@@ -136,7 +155,7 @@ class ManagedModelRuntimeTest {
                     ObjectNode result=mapper.createObjectNode();
                     switch(method) {
                         case "initialize" -> { }
-                        case "config/read" -> result.putObject("config").put("model_provider","openai").put("model","gpt-local");
+                        case "config/read" -> result.putObject("config").put("model_provider","openai").put("model","gpt-local").put("model_catalog_json",Path.of(cwd,"local-models.json").toString());
                         case "model/list" -> result.putArray("data").addObject().put("model","gpt-local").put("isDefault",true);
                         case "thread/read" -> result.putObject("thread").put("id","fixture-thread").put("cwd",cwd)
                                 .putObject("status").put("type","idle");

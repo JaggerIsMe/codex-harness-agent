@@ -30,6 +30,12 @@ final class ResponsesCompatibilityProxy implements AutoCloseable {
     private String thread;
     private volatile ResponsesHistoryPolicy policy;
     private volatile Consumer<String> notice=ignored->{ };
+    private volatile com.myharness.agent.usage.ManagedUsageClient usageClient;
+    private volatile String usageTurnId;
+    private volatile boolean meteringRequired;
+    void requireMetering(){meteringRequired=true;}
+    private volatile Consumer<String> usageDenied=ignored->{};
+    void meter(com.myharness.agent.usage.ManagedUsageClient client,String tid,Consumer<String> denied){usageClient=client;usageTurnId=tid;usageDenied=denied;meteringRequired=true;}
     private final Set<String> notified=ConcurrentHashMap.newKeySet();
     private final java.util.concurrent.atomic.AtomicLong requests=new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong searchRequests=new java.util.concurrent.atomic.AtomicLong();
@@ -76,6 +82,8 @@ final class ResponsesCompatibilityProxy implements AutoCloseable {
     private void handle(HttpExchange exchange) throws IOException {
         received.incrementAndGet();
         boolean sent=false;
+        boolean usageFailure=false;
+        com.myharness.agent.usage.ManagedUsageClient.Request metered=null;
         try {
             String path=exchange.getRequestURI().getRawPath();
             String suffix=path.startsWith(prefix+"/")?path.substring(prefix.length()):"";
@@ -115,6 +123,14 @@ final class ResponsesCompatibilityProxy implements AutoCloseable {
                 imageHeaders=Map.copyOf(headers);
             }
             if(search) searchRequests.incrementAndGet();else if(image) imageRequests.incrementAndGet();else requests.incrementAndGet();
+            if(meteringRequired && usageClient==null){usageFailure=true;throw new CodexException("当前模型请求未绑定可计量的 Turn");}
+            if(usageClient!=null) {
+                if(standaloneTool){usageFailure=true;throw new CodexException("当前计价规则不支持独立收费工具");}
+                var requestBody=(com.fasterxml.jackson.databind.node.ObjectNode)json.readTree(body);
+                try {metered=usageClient.begin(usageTurnId,requestBody,suffix.endsWith("/compact"));}
+                catch(CodexException failure){usageFailure=true;usageDenied.accept(failure.getMessage());throw failure;}
+                body=json.writeValueAsBytes(requestBody);
+            }
             var builder=HttpRequest.newBuilder(URI.create(upstream+suffix)).timeout(Duration.ofMinutes(5))
                     .POST(HttpRequest.BodyPublishers.ofByteArray(body));
             exchange.getRequestHeaders().forEach((key,values)->{if(forwardHeader(key)) values.forEach(value->builder.header(key,value));});
@@ -133,9 +149,10 @@ final class ResponsesCompatibilityProxy implements AutoCloseable {
                 if(sse && response.statusCode()<300) {
                     exchange.getResponseHeaders().set("Content-Type","text/event-stream");
                     exchange.sendResponseHeaders(response.statusCode(),0);sent=true;
-                    relaySse(input,exchange.getResponseBody());
+                    relaySse(input,exchange.getResponseBody(),metered);
                 } else {
                     byte[] reply=bounded(input);
+                    if(metered!=null && lastMime.contains("json"))metered.observe(json.readTree(reply));
                     if(!standaloneTool && response.statusCode()<300 && lastMime.contains("json")) policy.observe(json.readTree(reply));
                     exchange.sendResponseHeaders(response.statusCode(),reply.length);sent=true;exchange.getResponseBody().write(reply);
                 }
@@ -144,16 +161,20 @@ final class ResponsesCompatibilityProxy implements AutoCloseable {
         catch(Exception e) {
             String message=e instanceof CodexException?e.getMessage():"Responses compatibility bridge failed";
             lastFailure=message+" ("+e.getClass().getSimpleName()+")";
-            if(!sent) error(exchange,e instanceof CodexException?400:502,message);
-        } finally {exchange.close();}
+            if(!sent) error(exchange,e instanceof CodexException?400:502,message,usageFailure?"managed_usage_error":"history_compatibility_error");
+        } finally {
+            try {if(metered!=null)metered.finish();}
+            finally {exchange.close();}
+        }
     }
-    private void relaySse(InputStream input,OutputStream output) throws IOException {
+    private void relaySse(InputStream input,OutputStream output,com.myharness.agent.usage.ManagedUsageClient.Request metered) throws IOException {
         var reader=new BufferedReader(new InputStreamReader(input,StandardCharsets.UTF_8));
         StringBuilder data=new StringBuilder();String line;
         while((line=readLine(reader))!=null) {
             if(line.isEmpty()) {
                 if(!data.isEmpty() && !"[DONE]".equals(data.toString().trim())) {
                     JsonNode event=json.readTree(data.toString());lastEvent=event.path("type").asText().replaceAll("[^a-zA-Z0-9_.]","");policy.observe(event);
+                    if(metered!=null)metered.observe(event);
                 }
                 data.setLength(0);
             } else if(line.startsWith("data:")) {
@@ -199,7 +220,10 @@ final class ResponsesCompatibilityProxy implements AutoCloseable {
         };
     }
     private void error(HttpExchange exchange,int status,String message) throws IOException {
-        var body=json.createObjectNode();body.putObject("error").put("type","history_compatibility_error").put("message",message);
+        error(exchange,status,message,"history_compatibility_error");
+    }
+    private void error(HttpExchange exchange,int status,String message,String type) throws IOException {
+        var body=json.createObjectNode();body.putObject("error").put("type",type).put("message",message);
         byte[] bytes=json.writeValueAsBytes(body);exchange.getResponseHeaders().set("Content-Type","application/json");
         exchange.sendResponseHeaders(status,bytes.length);exchange.getResponseBody().write(bytes);
     }

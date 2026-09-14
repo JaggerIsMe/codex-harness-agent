@@ -26,6 +26,7 @@ class ExpertSkillTransportLifecycleTest {
                                                                   @TempDir Path root) throws Exception {
         Path workspace = Files.createDirectory(root.resolve("project"));
         Path data = Files.createDirectory(root.resolve("data"));
+        Path catalog=Files.writeString(root.resolve("local-models.json"),"{\"models\":[{\"slug\":\"local-probe\"}]}");
         Path skill = Files.createDirectories(workspace.resolve(".harness/expert-runtimes/1/probe")).resolve("SKILL.md");
         Files.writeString(skill, "---\nname: hello-skill\ndescription: Test fixture.\n---\nReply hello.\n");
         var skills = List.of(new CodexSkillInput("hello-skill", skill.toRealPath().toString()));
@@ -49,7 +50,7 @@ class ExpertSkillTransportLifecycleTest {
                 methods.add(method);
                 var result = json.createObjectNode();
                 switch (method) {
-                    case "config/read" -> result.putObject("config").put("model_provider", "openai").put("model", "local-probe");
+                    case "config/read" -> result.putObject("config").put("model_provider", "openai").put("model", "local-probe").put("model_catalog_json",catalog.toString());
                     case "model/list" -> result.putArray("data").addObject().put("model", "local-probe").put("isDefault", true);
                     case "account/read" -> result.putNull("account");
                     case "mcpServerStatus/list" -> result.putArray("data");

@@ -4,6 +4,15 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 class WindowsExecutionToolsTest {
+    @Test void orchestrationAndWindowsToolsUseOneCanonicalFormat() {
+        var params=new com.fasterxml.jackson.databind.ObjectMapper().createObjectNode();
+        WindowsExecutionTools.configure(params,true,true,true);
+        WindowsExecutionTools.configureCommands(params,new com.myharness.agent.config.AgentProperties());
+        OrchestrationOutcomeTool.configure(params);
+        assertTrue(params.path("dynamicTools").size()>1);
+        for(var tool:params.path("dynamicTools"))
+            assertEquals("function",tool.path("type").asText(),"Mixed dynamic tool format: "+tool.path("name").asText());
+    }
     @Test void eventSummaryDoesNotSendImageBytesToPlatformOrMutateModelOutput() {
         var json=new com.fasterxml.jackson.databind.ObjectMapper();var item=json.createObjectNode().put("type","dynamicToolCall").put("tool","harness_view_image");
         var content=item.putArray("contentItems");content.addObject().put("type","inputImage").put("imageUrl","data:image/png;base64,PRIVATE_PIXELS");

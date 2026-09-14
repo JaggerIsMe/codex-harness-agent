@@ -1,6 +1,15 @@
 package com.myharness.agent.codex;
 
 public class CodexTurnInput {
+    private String harnessTurnId;
+    private boolean managedUsage;
+    public CodexTurnInput withManagedUsage(boolean value){managedUsage=value;return this;}
+    public boolean isManagedUsage(){return managedUsage;}
+    public CodexTurnInput withHarnessTurnId(String value){harnessTurnId=value;return this;}
+    public String getHarnessTurnId(){return harnessTurnId;}
+    private boolean orchestration;
+    public CodexTurnInput withOrchestration(boolean value){orchestration=value;return this;}
+    public boolean isOrchestration(){return orchestration;}
     private boolean managedExpert;
     private String expertInstructions;
     private java.util.List<CodexSkillInput> skills=java.util.List.of();

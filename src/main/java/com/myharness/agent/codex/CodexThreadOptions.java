@@ -3,6 +3,9 @@ package com.myharness.agent.codex;
 import java.nio.file.Path;
 
 public class CodexThreadOptions {
+    private boolean orchestration;
+    public CodexThreadOptions withOrchestration(boolean value){orchestration=value;return this;}
+    public boolean isOrchestration(){return orchestration;}
     private boolean isolatedExpertRuntime;
     private java.util.List<CodexSkillInput> expertSkills=java.util.List.of();
     private java.util.List<com.myharness.agent.entity.dto.McpRuntimeDTO> mcpServers=java.util.List.of();

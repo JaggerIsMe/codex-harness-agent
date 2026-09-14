@@ -44,6 +44,7 @@ public class AppServerCodexAdapter implements CodexGateway {
     private final Map<Long, CompletableFuture<JsonNode>> pendingRequests = new ConcurrentHashMap<>();
     private final Map<String, CodexEventListener> listenersByTurn = new ConcurrentHashMap<>();
     private final Map<String, CodexEventListener> listenersByThread = new ConcurrentHashMap<>();
+    private final java.util.Set<String> orchestrationThreads=ConcurrentHashMap.newKeySet();
     private final Map<String, Path> threadWorkspaces = new ConcurrentHashMap<>();
     private final java.util.Set<String> imageInputThreads=ConcurrentHashMap.newKeySet();
     private final Map<String,Thread> nativeCommands=new ConcurrentHashMap<>();
@@ -62,6 +63,9 @@ public class AppServerCodexAdapter implements CodexGateway {
     private volatile boolean closing;
     private volatile boolean runtimeFailed;
     private volatile com.myharness.agent.entity.dto.ModelRuntimeDTO startupModelRuntime;
+    private Path localModelCatalog;
+    private com.myharness.agent.usage.ManagedUsageClient usageClient;
+    public AppServerCodexAdapter withUsageClient(com.myharness.agent.usage.ManagedUsageClient value){usageClient=value;return this;}
     @Override public boolean isAvailable() {return !runtimeFailed && process!=null && process.isAlive();}
 
     public AppServerCodexAdapter(AgentProperties properties, ObjectMapper objectMapper) {
@@ -90,6 +94,7 @@ public class AppServerCodexAdapter implements CodexGateway {
         disableInheritedMcpServers(params,options);
         if(nativeWindows()) WindowsExecutionTools.configure(params,true,supportsImageInput(options),controlledImages());
         if(nativeWindows()) WindowsExecutionTools.configureCommands(params,properties);
+        if(options.isOrchestration()) OrchestrationOutcomeTool.configure(params);
         params.put("ephemeral", false);
         if(options.isIsolatedExpertRuntime()) configureSkillRoots(options.getWorkspace(),options.getExpertSkills());
         JsonNode result = request("thread/start", params);
@@ -210,7 +215,8 @@ public class AppServerCodexAdapter implements CodexGateway {
     }
 
     private boolean historyEnabled(CodexThreadOptions options) {
-        return properties.isResponsesHistoryCompatibility() && options.getModelRuntime()!=null && options.getModelRuntime().getSchemaVersion()>=2;
+        return options.getModelRuntime()!=null && options.getModelRuntime().getSchemaVersion()>=2
+            && (properties.isResponsesHistoryCompatibility() || options.getModelRuntime().getSchemaVersion()>=3);
     }
     private void configureHistoryProxy(ObjectNode params,CodexThreadOptions options,ModelTarget target) {
         if(!historyEnabled(options)) return;
@@ -239,6 +245,7 @@ public class AppServerCodexAdapter implements CodexGateway {
         boolean imageGeneration=!managed && "openai".equals(target.provider());
         if(historyProxy==null) historyProxy=new ResponsesCompatibilityProxy(properties.getDataDir(),options.getWorkspace(),upstream,identity,objectMapper,standaloneSearch,imageGeneration);
         else historyProxy.verifyIdentity(identity);
+        if(managed && options.getModelRuntime().getSchemaVersion()>=3)historyProxy.requireMetering();
         config.withObject("features").put("responses_websockets",false).put("responses_websockets_v2",false);
         if(!managed && "openai".equals(target.provider())) {
             config.put("openai_base_url",historyProxy.baseUrl());
@@ -371,7 +378,16 @@ public class AppServerCodexAdapter implements CodexGateway {
         ObjectNode read=objectMapper.createObjectNode();read.put("cwd",workspace.toString());
         JsonNode config=request("config/read",read);
         ObjectNode list=objectMapper.createObjectNode();list.put("limit",1000);list.put("includeHidden",true);
-        return selectLocalModelTarget(config,request("model/list",list));
+        ModelTarget target=selectLocalModelTarget(config,request("model/list",list));
+        if(localModelCatalog==null) {
+            localModelCatalog=new QuestionToolCatalog(objectMapper).localSource(config.path("config"),target.model(),QuestionToolCatalog.codexHome());
+            // Discovery has no active Turn. Reload model capabilities before starting/resuming work.
+            synchronized(lifecycleLock) {
+                if(!threadWorkspaces.isEmpty())throw new CodexException("Cannot change question tools in a loaded Conversation");
+                Process discovery=process;process=null;writer=null;stopProcessTree(discovery);
+            }
+        }
+        return target;
     }
 
     static ModelTarget selectLocalModelTarget(JsonNode configResult,JsonNode modelListResult) {
@@ -417,6 +433,12 @@ public class AppServerCodexAdapter implements CodexGateway {
         if(!hasText(runtime.getApiKey()) || !hasText(runtime.getRuntimeKey())) throw new CodexException("托管模型凭据或运行标识缺失");
         JsonNode raw=params.get("config");ObjectNode config=raw instanceof ObjectNode value?value:params.putObject("config");
         config.put("model_provider","harness_managed");
+        if("MANAGED_PROVIDER".equals(runtime.getRuntimeMode()) && runtime.getSchemaVersion()>=3) {
+            // RESPONSES_TEXT_V1 accounts for tokens only. Codex otherwise advertises
+            // cached web search by default, making even ordinary questions fail admission.
+            config.put("web_search","disabled");
+            config.withObject("features").put("image_generation",false);
+        }
         ObjectNode provider=config.withObject("model_providers").putObject("harness_managed");
         provider.put("name",hasText(runtime.getProviderName())?runtime.getProviderName():"Harness Managed");
         provider.put("base_url",runtime.getBaseUrl());provider.put("env_key","HARNESS_MODEL_API_KEY");
@@ -542,8 +564,18 @@ public class AppServerCodexAdapter implements CodexGateway {
             ObjectNode image=inputs.addObject();image.put("type","localImage");image.put("path",imagePath);
         }
         configureExpert(params,input,threadModels.get(threadId),expertSkills);
+        if(input.isOrchestration())orchestrationThreads.add(threadId);else orchestrationThreads.remove(threadId);
         listenersByThread.put(threadId, listener);
         try {
+            if(input.isManagedUsage() || startupModelRuntime!=null && "MANAGED_PROVIDER".equals(startupModelRuntime.getRuntimeMode()) && startupModelRuntime.getSchemaVersion()>=3) {
+                if(historyProxy==null || usageClient==null || input.getHarnessTurnId()==null)throw new CodexException("托管模型计量模块不可用，请配套升级 Agent");
+                historyProxy.meter(usageClient,input.getHarnessTurnId(),message->Thread.ofVirtual().start(()->{
+                    runtimeFailed=true;
+                    stopProcessTree(process);
+                    failRuntime(message,null);
+                    listener.onCompleted(null,"failed",message);
+                }));
+            }
             if(historyProxy!=null) historyProxy.onNotice(notice->listener.onEvent(new CodexEvent(TurnEventType.WARNING,null,notice,
                     objectMapper.createObjectNode().put("type","historyCompatibility").put("policy",ResponsesHistoryPolicy.POLICY))));
             JsonNode result = request("turn/start", params);
@@ -552,6 +584,7 @@ public class AppServerCodexAdapter implements CodexGateway {
             return turnId;
         } catch (RuntimeException exception) {
             listenersByThread.remove(threadId, listener);
+            orchestrationThreads.remove(threadId);
             throw exception;
         }
     }
@@ -640,10 +673,8 @@ public class AppServerCodexAdapter implements CodexGateway {
             }
             closing = false;
             try {
-                Path modelCatalog=null;
-                if(startupModelRuntime!=null&&hasText(startupModelRuntime.getBaseUrl()))
-                    modelCatalog=new ManagedModelCatalog(objectMapper).write(
-                            properties.getDataDir().resolve("model-catalogs"),startupModelRuntime);
+                Path modelCatalog=startupModelCatalog();
+                if(modelCatalog!=null)modelCatalog=new QuestionToolCatalog(objectMapper).project(modelCatalog,properties.getDataDir().resolve("model-catalogs"));
                 List<String> command = CodexProcessCommand.appServer(properties.getCodexCommand(),
                         properties.isStrictProjectIsolation(),properties.getWindowsSandbox(),modelCatalog);
                 LOGGER.info("Starting Codex App Server with command {} in {}", command, System.getProperty("user.dir"));
@@ -674,6 +705,12 @@ public class AppServerCodexAdapter implements CodexGateway {
                 throw exception;
             }
         }
+    }
+
+    Path startupModelCatalog() {
+        if(startupModelRuntime!=null&&hasText(startupModelRuntime.getBaseUrl()))
+            return new ManagedModelCatalog(objectMapper).write(properties.getDataDir().resolve("model-catalogs"),startupModelRuntime);
+        return localModelCatalog;
     }
 
     private void initialize() {
@@ -780,6 +817,25 @@ public class AppServerCodexAdapter implements CodexGateway {
     }
 
     private void handleServerRequest(JsonNode id, String method, JsonNode params) {
+        if("item/tool/call".equals(method) && OrchestrationOutcomeTool.NAME.equals(params.path("tool").asText())) {
+            String threadId=params.path("threadId").asText();
+            var target=listener(params);
+            if(!orchestrationThreads.contains(threadId) || target==null || listenersByThread.get(threadId)!=target
+                || listenersByTurn.get(params.path("turnId").asText())!=target
+                || cancelledNativeTurns.contains(params.path("turnId").asText())) {
+                sendErrorResponse(id,-32602,"No active orchestration node");return;
+            }
+            var response=objectMapper.createObjectNode().put("jsonrpc","2.0");response.set("id",id.deepCopy());
+            var result=response.putObject("result");
+            try {
+                OrchestrationOutcomeTool.validate(params.path("arguments"));
+                target.onNodeOutcome(params.path("arguments").deepCopy());
+                result.put("success",true).putArray("contentItems").addObject().put("type","inputText").put("text","Outcome recorded. The platform validates the node after this turn ends.");
+            } catch(RuntimeException failure) {
+                result.put("success",false).putArray("contentItems").addObject().put("type","inputText").put("text","Invalid node outcome");
+            }
+            write(response);return;
+        }
         if("item/tool/call".equals(method) && nativeWindows()) {
             handleNativeCommand(id,params);return;
         }
@@ -888,6 +944,7 @@ public class AppServerCodexAdapter implements CodexGateway {
             String threadId = textOrNull(params, "threadId");
             if (threadId != null && listener != null) {
                 listenersByThread.remove(threadId, listener);
+                orchestrationThreads.remove(threadId);
             }
             if(turnId!=null) cancelledNativeTurns.remove(turnId);
             return;

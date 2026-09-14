@@ -152,10 +152,27 @@ public class AgentSessionManager {
             if(!command.getAttachments().isEmpty() && !attemptedAttachmentTurns.add(command.getTurnId()))
                 throw new AgentOperationException("TURN_ALREADY_ATTEMPTED","附件 Turn 不能重复启动");
             attachments.claim(command);
+            if(command.getOrchestration()!=null && !command.getOrchestration().isNull())
+                active.orchestration=new OrchestrationTurn(command.getOrchestration(),workspaceRegistry,command.getWorkspaceName());
+            if(active.orchestration!=null && active.orchestration.inputError()!=null) {
+                var item=com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode()
+                    .put("type","agentMessage").put("id","node-input-validation-"+active.harnessTurnId)
+                    .put("phase","final_answer").put("text",active.orchestration.inputError());
+                listener.onEvent(new CodexEvent(com.myharness.agent.entity.enums.TurnEventType.ITEM_COMPLETED,
+                    item.path("id").asText(),null,"final_answer",item));
+                var checkpoint=active.orchestration.finish();
+                finish(session,active);
+                return new AgentEvent(AgentEventType.TURN_COMPLETED,active.harnessTurnId,
+                    new TurnTerminalEventDTO(session.conversationId,active.harnessTurnId,null,active.orchestration.inputError(),active.eventSeq).withOrchestration(checkpoint));
+            }
             synchronized(active) {active.preparation.check(); active.launching=true;}
             if(!command.getAttachments().isEmpty()) listener.onEvent(new CodexEvent(com.myharness.agent.entity.enums.TurnEventType.ITEM_COMPLETED,
                     "attachment-preparation","附件已保存到项目，正在启动 Codex",null,null));
             CodexTurnInput input=new CodexTurnInput(message).withLocalImages(preparedAttachments.localImages());
+            input.withHarnessTurnId(command.getTurnId());
+            input.withManagedUsage(command.getModelRuntime()!=null && command.getModelRuntime().getSchemaVersion()>=3
+                && "MANAGED_PROVIDER".equals(command.getModelRuntime().getRuntimeMode()));
+            input.withOrchestration(active.orchestration!=null);
             if(command.getExpertRuntime()!=null) input.withExpert(command.getExpertRuntime().getSystemPrompt(),preparedSkills);
             String codexTurnId = codexGateway.startTurn(session.codexThreadId,input,listener);
             session.needsHistory=false;
@@ -286,6 +303,12 @@ public class AgentSessionManager {
 
     private CodexEventListener listener(SessionContext session, ActiveTurn active) {
         return new CodexEventListener() {
+            @Override public void onNodeOutcome(com.fasterxml.jackson.databind.JsonNode outcome) {
+                synchronized(active) {
+                    if(active.finished.get() || active.orchestration==null)throw new CodexException("No active node");
+                    active.orchestration.report(outcome);
+                }
+            }
             @Override
             public void onEvent(CodexEvent event) {
                 synchronized (active) {
@@ -307,6 +330,7 @@ public class AgentSessionManager {
             public void onCompleted(String codexTurnId, String status, String reason) {
                 synchronized (active) {
                     if(active.finished.get()) return;
+                    var checkpoint=active.orchestration==null?null:active.orchestration.finish();
                     if (!finish(session, active)) {
                         return;
                     }
@@ -320,7 +344,7 @@ public class AgentSessionManager {
                     }
                     eventBus.publish(new AgentEvent(type, active.harnessTurnId,
                             new TurnTerminalEventDTO(session.conversationId, active.harnessTurnId,
-                                    codexTurnId, reason, active.eventSeq)));
+                                    codexTurnId, reason, active.eventSeq).withOrchestration(checkpoint)));
                 }
             }
         };
@@ -430,7 +454,7 @@ public class AgentSessionManager {
                 throw new AgentOperationException("MODEL_CONFIG_INVALID","需要有效的 Device 托管模型运行配置");
             return;
         }
-        if(runtime.getSchemaVersion()!=2 || !validKey)
+        if((runtime.getSchemaVersion()!=2 && runtime.getSchemaVersion()!=3) || !validKey)
             throw new AgentOperationException("MODEL_CONFIG_INVALID","需要受支持的 Device 模型运行目标");
         if("LOCAL_CODEX".equals(runtime.getRuntimeMode())) {
             if(hasText(runtime.getBaseUrl()) || hasText(runtime.getModelId()) || hasText(runtime.getApiKey()) || runtime.getConfigurationVersionId()!=null)
@@ -462,6 +486,7 @@ public class AgentSessionManager {
         if(runtime.getSchemaVersion()>=3 && session.expertId!=null && !session.expertId.equals(runtime.getExpertId()))
             throw new AgentOperationException("CONVERSATION_BINDING_MISMATCH","Conversation 不能切换到另一个 Expert");
         var options=new CodexThreadOptions(session.projectId,session.workspace,command.getModelRuntime())
+                .withOrchestration(command.getOrchestration()!=null && !command.getOrchestration().isNull())
                 .withExpertRuntime(skills,runtime.getMcpServers()==null ? java.util.List.of() : runtime.getMcpServers());
         String nextModelRuntimeKey=command.getModelRuntime()==null?null:command.getModelRuntime().getRuntimeKey();
         boolean modelChanged=!java.util.Objects.equals(session.modelRuntimeKey,nextModelRuntimeKey);
@@ -552,6 +577,7 @@ public class AgentSessionManager {
         private final String harnessTurnId;
         private final AtomicBoolean finished = new AtomicBoolean();
         private volatile String codexTurnId;
+        private OrchestrationTurn orchestration;
 
         private ActiveTurn(String harnessTurnId) {
             this.harnessTurnId = harnessTurnId;

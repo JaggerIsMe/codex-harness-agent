@@ -1,6 +1,9 @@
 package com.myharness.agent.entity.dto;
 
 public class StartTurnCommandDTO {
+    private com.fasterxml.jackson.databind.JsonNode orchestration;
+    public com.fasterxml.jackson.databind.JsonNode getOrchestration(){return orchestration;}
+    public void setOrchestration(com.fasterxml.jackson.databind.JsonNode value){orchestration=value;}
     private String threadModelRuntimeKey;
     public String getThreadModelRuntimeKey(){return threadModelRuntimeKey;}
     public void setThreadModelRuntimeKey(String value){threadModelRuntimeKey=value;}
