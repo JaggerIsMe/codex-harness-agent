@@ -27,6 +27,8 @@ public class ProjectIsolationCheck {
             verifyWindows();properties.confirmReadIsolation();return;
         }
         if(!"Linux".equalsIgnoreCase(osName)) return;
+        if(properties.isPublicCommandNetwork())
+            throw new CodexException("PUBLIC 命令网络当前仅支持 Windows LPAC；Linux 请配置 command-network-mode: DISABLED");
         verify();
         properties.confirmReadIsolation();
     }
@@ -84,15 +86,36 @@ public class ProjectIsolationCheck {
                     assert not temp.is_relative_to(Path.cwd())
                     (temp/'probe.txt').write_text('TEMP_OK')
                     print('HARNESS_ISOLATION_OK')
-                    """.formatted(json.writeValueAsString(outside.toAbsolutePath().toString()),json.writeValueAsString(skill.toString())),30,properties.getWindowsPython(),scope,List.of(),java.util.Map.of(),120);
+                    """.formatted(json.writeValueAsString(outside.toAbsolutePath().toString()),json.writeValueAsString(skill.toString())),30,properties.getWindowsPython(),scope,List.of(),java.util.Map.of(),120,properties.isPublicCommandNetwork());
             if(result.exitCode()!=0 || !result.output().lines().anyMatch("HARNESS_ISOLATION_OK"::equals)
                     || !Files.readString(outside).equals("OUTSIDE") || !Files.readString(project.resolve("created.txt")).equals("WRITE_OK"))
                 throw new CodexException("Windows LPAC isolation self-test failed; execution remains disabled: "+result.output());
             var other=new SkillExecutionScope("other",Files.createDirectory(root.resolve("other-execution")),List.of());
             var denied=WindowsIsolatedCommand.executeScoped(project,"from pathlib import Path;Path("+json.writeValueAsString(skill.toString())+").read_text()",
-                    15,properties.getWindowsPython(),other,List.of(),java.util.Map.of(),120);
+                    15,properties.getWindowsPython(),other,List.of(),java.util.Map.of(),120,properties.isPublicCommandNetwork());
             if(denied.exitCode()==0 || !denied.output().contains("PermissionError") || !Files.readString(skill).equals("SKILL_PROBE"))
                 throw new CodexException("Windows Skill grants escaped their command scope");
+            try(var listener=new java.net.ServerSocket(0,1,java.net.InetAddress.getByName("127.0.0.1"))) {
+                listener.setSoTimeout(2000);
+                try(var control=new java.net.Socket("127.0.0.1",listener.getLocalPort());var accepted=listener.accept()) {
+                    if(!accepted.isConnected())throw new CodexException("Loopback probe listener is not reachable from host");
+                }
+                var local=WindowsIsolatedCommand.executeScoped(project,"""
+                        import socket
+                        try:
+                            socket.create_connection(('127.0.0.1',%d),timeout=2)
+                        except (PermissionError,TimeoutError):
+                            print('LOOPBACK_DENIED')
+                        else:
+                            raise AssertionError('loopback access allowed')
+                        """.formatted(listener.getLocalPort()),10,properties.getWindowsPython(),scope,List.of(),java.util.Map.of(),120,properties.isPublicCommandNetwork());
+                if(local.exitCode()!=0 || !local.output().contains("LOOPBACK_DENIED"))
+                    throw new CodexException("Windows command loopback isolation self-test failed: "+local.output());
+                listener.setSoTimeout(200);
+                try(var unexpected=listener.accept()) {
+                    throw new CodexException("Windows isolated command reached the loopback listener");
+                } catch(java.net.SocketTimeoutException expected) { /* A live host listener received no sandbox connection. */ }
+            }
         } catch(CodexException failure) {throw failure;}
         catch(Exception failure) {throw new CodexException("Cannot verify Windows native read isolation",failure);}
         finally {

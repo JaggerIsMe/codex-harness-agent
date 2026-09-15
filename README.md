@@ -21,7 +21,7 @@ Harness Agent 通过主动 WSS 连接接受 Harness Server 指令，并在项目
 ## 权限与执行
 
 - Java 21、Maven 3.6.3+；Codex 版本与平台验证范围见下方隔离约束。
-- Linux 每个 Thread 使用独立 named permission profile；Windows 关闭原生本地执行工具，通过独立 Python 运行时和 LPAC 执行。只读运行时与当前 Workspace 为授权范围，命令禁网，不继承 Agent 凭证环境变量；私有数据位于 Workspace 外，独立执行临时区按项目授权。用户项目元数据目录可由隔离命令修改，Agent 不再创建占位目录。
+- Linux 每个 Thread 使用独立 named permission profile；Windows 关闭原生本地执行工具，通过独立 Python 运行时和 LPAC 执行。当前 Workspace、按运行隔离的临时区、配置运行时及授权 Skill 目录构成精确权限范围；不继承 Agent 凭证。Windows 可配置 PUBLIC 公网出站访问或 DISABLED 禁网，Linux 当前仅支持 DISABLED。私有数据位于 Workspace 外。用户项目元数据目录可由隔离命令修改，Agent 不再创建占位目录。
 - Agent 在注册前进行真实访问自检，Windows 通过后上报 `WINDOWS_LPAC_V1`，Linux 通过后上报 `LINUX_PROJECT_PROFILE_V1`；失败停止启动。
 - Server 同时支持上述 Windows 和 Linux 能力，不再将旧 `WINDOWS_PROJECT_PROFILE` 视为读取隔离。Windows 当前固定验证 Codex 0.153.0，需要配置 `windows-python` 专用运行时。
 - Linux 首版允许一个 Agent 下的多个项目工作区，原生安装包采用核心现有默认 `max-workspaces=0`（不设数量上限），可配置大于 1 的容量上限；该配置约束项目工作区总数，不是父目录数量或 Turn 并发数。每个项目独占 Workspace，重启和重试须保留原归属；安装包配置与多项目隔离验收仍待完成。
@@ -110,4 +110,8 @@ mvn '-Dcodex.smoke=true' '-Dtest=CodexAppServerSmokeTest' test
 mvn '-Dcodex.smoke=true' '-Dtest=CodexAppServerSmokeTest#resumesExistingStoredThreadWithoutSendingModelRequest' '-Dcodex.resume.thread=<已有Thread ID>' '-Dcodex.resume.workspace=<原工作区绝对路径>' test
 ```
 
-恢复使用官方 [Codex App Server 的 thread/read 与 thread/resume 协议](https://learn.chatgpt.com/docs/app-server)。恢复前后都会校验 Thread ID 和目录；执行 Turn 时继续使用项目权限 profile、命令禁网与 `approvalPolicy=on-request`，并重新配置执行前确认能力。
+恢复使用官方 [Codex App Server 的 thread/read 与 thread/resume 协议](https://learn.chatgpt.com/docs/app-server)。恢复前后都会校验 Thread ID 和目录；执行 Turn 时继续使用项目权限 profile、Agent 配置的网络模式与 `approvalPolicy=on-request`，并重新配置执行前确认能力。
+
+## Skill 公网 API
+
+Windows 配置 `harness.agent.command-network-mode: PUBLIC`（示例配置默认值）后，脚本可调用公网 HTTP/HTTPS API；环境变量 `HARNESS_COMMAND_NETWORK_MODE=DISABLED` 可恢复禁网。需同步升级 Server 和前端以识别 `WINDOWS_LPAC_API_V3`，重启 Agent 后新建 Conversation。同模式会话支持恢复。Linux PUBLIC 目前明确拒绝注册，需设置 DISABLED。依赖安装不包含在此功能内。详见 [验证与部署说明](../../docs/testing/public-api-skill.md)。

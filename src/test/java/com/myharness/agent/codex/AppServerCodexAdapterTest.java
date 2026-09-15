@@ -38,7 +38,9 @@ class AppServerCodexAdapterTest {
             var adapter=new AppServerCodexAdapter(storageProperties(workspace),mapper) {
                 @Override JsonNode request(String method,JsonNode input) {
                     ObjectNode result=mapper.createObjectNode();
-                    if("mcpServerStatus/list".equals(method)) {
+                    if("config/read".equals(method)) {
+                        result.putObject("config").putObject("mcp_servers");
+                    } else if("mcpServerStatus/list".equals(method)) {
                         var data=result.putArray("data");result.putNull("nextCursor");
                         if(input.path("threadId").isTextual())
                             data.addObject().put("name","openai-api-key-local-confirmation").put("runtimeStatus","connected");
@@ -68,7 +70,9 @@ class AppServerCodexAdapterTest {
                 private boolean pluginsEnabled=true;
                 @Override JsonNode request(String method,JsonNode input) {
                     ObjectNode result=mapper.createObjectNode();
-                    if("mcpServerStatus/list".equals(method)) {
+                    if("config/read".equals(method)) {
+                        result.putObject("config").putObject("mcp_servers");
+                    } else if("mcpServerStatus/list".equals(method)) {
                         var data=result.putArray("data");result.putNull("nextCursor");
                         if(input.path("threadId").isTextual() && pluginsEnabled)
                             data.addObject().put("name","openai-api-key-local-confirmation").put("runtimeStatus","connected");
@@ -183,13 +187,20 @@ class AppServerCodexAdapterTest {
         assertTrue(params.path("config").path("existing").asBoolean());
     }
     @Test void explicitlyDisablesInheritedMcpServersForManagedExpert(@TempDir Path workspace) {
-        var options=new CodexThreadOptions("project",workspace,null).withExpertRuntime(List.of(),List.of());
+        var allowed=new com.myharness.agent.entity.dto.McpRuntimeDTO();
+        allowed.setServerCode("expert-mcp");allowed.setTransportType("STREAMABLE_HTTP");allowed.setUrl("https://mcp.example.com/expert");
+        var options=new CodexThreadOptions("project",workspace,null).withExpertRuntime(List.of(),List.of(allowed));
         ObjectNode params=new ObjectMapper().createObjectNode();
         var adapter=new AppServerCodexAdapter(storageProperties(workspace),new ObjectMapper()) {
             @Override JsonNode request(String method,JsonNode input) {
-                assertEquals("mcpServerStatus/list",method);
-                ObjectNode result=new ObjectMapper().createObjectNode();result.putNull("nextCursor");
-                result.putArray("data").addObject().put("name","user-global").put("runtimeStatus","connected");return result;
+                assertEquals("config/read",method);
+                assertEquals(workspace.toString(),input.path("cwd").asText());
+                ObjectNode result=new ObjectMapper().createObjectNode();
+                var servers=result.putObject("config").putObject("mcp_servers");
+                servers.putObject("user-global").put("url","https://mcp.example.com/global");
+                servers.putObject("project-only").put("command","project-mcp");
+                servers.putObject("expert-mcp").put("url","https://mcp.example.com/expert");
+                return result;
             }
         };
         adapter.configureMcpServers(params,options);
@@ -198,22 +209,25 @@ class AppServerCodexAdapterTest {
 
         JsonNode disabled=params.path("config").path("mcp_servers").path("user-global");
         assertFalse(disabled.path("enabled").asBoolean(true));
-        assertEquals("harness-disabled-mcp",disabled.path("command").asText(),
-                "a disabled session override still needs a parseable transport discriminator");
-        assertFalse(disabled.has("args"));
-        assertFalse(disabled.has("env"));
-        assertFalse(disabled.has("http_headers"));
+        assertEquals(new ObjectMapper().createObjectNode().put("enabled",false),disabled,
+                "disable inherited MCP without changing its transport or credentials during config merging");
+        assertEquals(disabled,params.path("config").path("mcp_servers").path("project-only"),
+                "project configuration must be disabled even when absent from the initial runtime inventory");
+        assertTrue(params.path("config").path("mcp_servers").path("expert-mcp").path("enabled").asBoolean());
+        assertEquals(allowed.getUrl(),params.path("config").path("mcp_servers").path("expert-mcp").path("url").asText());
     }
     @Test void acceptsNullRuntimeStatusForDisabledInheritedMcp(@TempDir Path workspace) {
         var mapper=new ObjectMapper();
-        int[] statusRequests={0};
         var adapter=new AppServerCodexAdapter(storageProperties(workspace),mapper) {
             @Override JsonNode request(String method,JsonNode input) {
                 ObjectNode result=mapper.createObjectNode();
+                if("config/read".equals(method)) {
+                    result.putObject("config").putObject("mcp_servers").putObject("user-global")
+                            .put("url","https://mcp.example.com/global");
+                    return result;
+                }
                 if("mcpServerStatus/list".equals(method)) {
-                    ObjectNode status=result.putArray("data").addObject().put("name","user-global");
-                    if(++statusRequests[0]>1) status.putNull("runtimeStatus");
-                    else status.put("runtimeStatus","connected");
+                    result.putArray("data").addObject().put("name","user-global").putNull("runtimeStatus");
                     result.putNull("nextCursor");
                     return result;
                 }
@@ -230,14 +244,18 @@ class AppServerCodexAdapterTest {
 
         assertEquals("managed-thread",adapter.startThread(options));
     }
-    @Test void doesNotSerializeCodexAppsPseudoTransportAsAStandardMcpOverride(@TempDir Path workspace) {
+    @Test void doesNotSerializeDiscoveredServicesWithoutStandardTransport(@TempDir Path workspace) {
         var options=new CodexThreadOptions("project",workspace,null).withExpertRuntime(List.of(),List.of());
         ObjectNode params=new ObjectMapper().createObjectNode();
         var adapter=new AppServerCodexAdapter(storageProperties(workspace),new ObjectMapper()) {
             @Override JsonNode request(String method,JsonNode input) {
-                assertEquals("mcpServerStatus/list",method);
-                ObjectNode result=new ObjectMapper().createObjectNode();result.putNull("nextCursor");
-                result.putArray("data").addObject().put("name","codex_apps").put("runtimeStatus","connected");return result;
+                assertEquals("config/read",method);
+                ObjectNode result=new ObjectMapper().createObjectNode();
+                var servers=result.putObject("config").putObject("mcp_servers");
+                servers.putObject("codex_apps").put("enabled",true);
+                servers.putObject("codex_app").put("enabled",true);
+                servers.putObject("plugin-service").put("enabled",true);
+                return result;
             }
         };
         adapter.configureMcpServers(params,options);
@@ -246,8 +264,9 @@ class AppServerCodexAdapterTest {
 
         assertFalse(params.path("config").path("features").path("apps").asBoolean(true),
                 "managed expert threads must disable the reserved Codex Apps MCP through its feature flag");
-        assertFalse(params.path("config").path("mcp_servers").has("codex_apps"),
-                "codex_apps is a special Apps transport and is invalid inside a standard mcp_servers session override");
+        assertFalse(params.path("config").path("features").path("plugins").asBoolean(true));
+        assertTrue(params.path("config").path("mcp_servers").isEmpty(),
+                "discovered services without standard transports must not become invalid session overrides");
     }
     @Test void refreshesDiscoveryAndLeavesBoundSkillAvailableWithoutChangingUserInput(@TempDir Path workspace) throws Exception {
         Path skill=privateRoot(workspace).resolve("expert-runtimes/1/runtime/skills/harness-expert-1-1/SKILL.md");

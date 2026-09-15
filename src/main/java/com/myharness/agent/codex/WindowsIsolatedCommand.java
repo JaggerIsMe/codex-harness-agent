@@ -19,7 +19,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
-/** Executes generated code with a Windows LPAC token. No host credentials or network capabilities. */
+/** Executes generated code with a Windows LPAC token and explicit network capabilities. */
 final class WindowsIsolatedCommand {
     private static final int MODIFY=0x1301bf;
     private static final int OUTPUT_LIMIT=128*1024;
@@ -38,7 +38,13 @@ final class WindowsIsolatedCommand {
     static Result executeScoped(Path directory,String script,int timeoutSeconds,Path python,SkillExecutionScope scope,java.util.List<Path> runtimes,java.util.Map<String,String> environment,int maximumTimeout) {
         return execute(directory,script,timeoutSeconds,python,scope.temporaryDirectory(),runtimes,environment,maximumTimeout,scope);
     }
+    static Result executeScoped(Path directory,String script,int timeoutSeconds,Path python,SkillExecutionScope scope,java.util.List<Path> runtimes,java.util.Map<String,String> environment,int maximumTimeout,boolean publicNetwork) {
+        return execute(directory,script,timeoutSeconds,python,scope.temporaryDirectory(),runtimes,environment,maximumTimeout,scope,publicNetwork);
+    }
     private static Result execute(Path directory,String script,int timeoutSeconds,Path python,Path temporaryDirectory,java.util.List<Path> runtimes,java.util.Map<String,String> extraEnvironment,int maximumTimeout,SkillExecutionScope scope) {
+        return execute(directory,script,timeoutSeconds,python,temporaryDirectory,runtimes,extraEnvironment,maximumTimeout,scope,false);
+    }
+    private static Result execute(Path directory,String script,int timeoutSeconds,Path python,Path temporaryDirectory,java.util.List<Path> runtimes,java.util.Map<String,String> extraEnvironment,int maximumTimeout,SkillExecutionScope scope,boolean publicNetwork) {
         if(!Platform.isWindows() || !Platform.is64Bit()) throw new CodexException("Windows isolation requires 64-bit Windows");
         if(script==null || script.isBlank() || script.length()>12000) throw new CodexException("Command must contain 1–12000 characters");
         if(timeoutSeconds<1 || timeoutSeconds>maximumTimeout) throw new CodexException("Command timeout must be 1–"+maximumTimeout+" seconds");
@@ -109,7 +115,7 @@ final class WindowsIsolatedCommand {
                 StringBuilder block=new StringBuilder();environment.forEach((key,value)->block.append(key).append('=').append(value).append('\0'));block.append('\0');
                 try(var env=new Memory((long)block.length()*2)) {
                     env.setWideString(0,block.substring(0,block.length()-1));
-                    return normalizePythonStartup(launch(shell,command,workspace,sid.getValue(),env,timeoutSeconds),runtime);
+                    return normalizePythonStartup(launch(shell,command,workspace,sid.getValue(),env,timeoutSeconds,publicNetwork),runtime);
                 }
             } finally {
                 try {
@@ -149,9 +155,8 @@ final class WindowsIsolatedCommand {
         return new Result(result.exitCode(),output);
     }
 
-    private static Result launch(String executable,String command,Path cwd,Pointer sid,Pointer env,int timeout) throws Exception {
-        var groups=new PointerByReference();var groupCount=new IntByReference();var caps=new PointerByReference();var capCount=new IntByReference();
-        check(KernelBase.API.DeriveCapabilitySidsFromName("registryRead",groups,groupCount,caps,capCount),"derive runtime capability");
+    private static Result launch(String executable,String command,Path cwd,Pointer sid,Pointer env,int timeout,boolean publicNetwork) throws Exception {
+        var capabilitySet=new CapabilitySet(publicNetwork);
         WinNT.HANDLE job=null,read=null,write=null,input=null;
         CompletableFuture<String> output=null;
         var process=new WinBase.PROCESS_INFORMATION();boolean started=false;
@@ -167,8 +172,7 @@ final class WindowsIsolatedCommand {
             check(Kernel32.INSTANCE.SetHandleInformation(read,1,0),"protect output reader");
             input=Kernel32.INSTANCE.CreateFile("NUL",0x80000000,3,security,3,0,null);
             check(input!=null && !WinBase.INVALID_HANDLE_VALUE.equals(input),"open input");
-            var capability=new SidAttributes();capability.sid=caps.getValue().getPointer(0);capability.attributes=4;capability.write();
-            var permissions=new Capabilities();permissions.sid=sid;permissions.capabilities=capability.getPointer();permissions.count=1;permissions.write();
+            var permissions=new Capabilities();permissions.sid=sid;permissions.capabilities=capabilitySet.entries[0].getPointer();permissions.count=capabilitySet.entries.length;permissions.write();
             var bytes=new LongByReference();Kernel.API.InitializeProcThreadAttributeList(null,3,0,bytes);
             try(var attributes=new Memory(bytes.getValue());var handles=new Memory(2L*Native.POINTER_SIZE)) {
                 check(Kernel.API.InitializeProcThreadAttributeList(attributes,3,0,bytes),"initialize process attributes");
@@ -206,7 +210,32 @@ final class WindowsIsolatedCommand {
                 read=null;job=null;
             }
             close(job);close(write);close(input);close(read);
-            freeArray(groups,groupCount);freeArray(caps,capCount);
+            capabilitySet.close();
+        }
+    }
+
+    private static final class CapabilitySet implements AutoCloseable {
+        private final java.util.List<PointerByReference> arrays=new java.util.ArrayList<>();
+        private final java.util.List<IntByReference> counts=new java.util.ArrayList<>();
+        private final SidAttributes[] entries;
+
+        CapabilitySet(boolean publicNetwork) {
+            String[] names=publicNetwork ? new String[]{"registryRead","internetClient"} : new String[]{"registryRead"};
+            entries=(SidAttributes[])new SidAttributes().toArray(names.length);
+            try {
+                for(int i=0;i<names.length;i++) {
+                    var groups=new PointerByReference();var groupCount=new IntByReference();
+                    var caps=new PointerByReference();var capCount=new IntByReference();
+                    arrays.add(groups);counts.add(groupCount);arrays.add(caps);counts.add(capCount);
+                    check(KernelBase.API.DeriveCapabilitySidsFromName(names[i],groups,groupCount,caps,capCount),"derive "+names[i]+" capability");
+                    check(capCount.getValue()>0,"resolve "+names[i]+" capability");
+                    entries[i].sid=caps.getValue().getPointer(0);entries[i].attributes=4;entries[i].write();
+                }
+            } catch(RuntimeException failure) {close();throw failure;}
+        }
+        @Override public void close() {
+            for(int i=0;i<arrays.size();i++)freeArray(arrays.get(i),counts.get(i));
+            arrays.clear();counts.clear();
         }
     }
 

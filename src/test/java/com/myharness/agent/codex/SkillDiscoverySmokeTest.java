@@ -28,6 +28,10 @@ class SkillDiscoverySmokeTest {
         Path pkg=AgentStorage.directory(AgentStorage.workspaceRoot(data,workspace),"expert-runtimes/38/"+key+"/skills/pkg");
         Path skill=Files.writeString(pkg.resolve("SKILL.md"),"---\nname: fixture-skill\ndescription: SKILL_INDEX_FIXTURE\n---\nSKILL_BODY_FIXTURE\n");
         Files.writeString(pkg.resolve("unused.py"),"UNUSED_SOURCE_FIXTURE");
+        boolean publicApi=Boolean.getBoolean("windows.public-api.skill");
+        Path apiScript=pkg.resolve("check_api.py");
+        if(publicApi) Files.copy(Path.of("../../examples/public-api-skill/harness-public-api-check/scripts/check_api.py"),apiScript);
+        var apiOutput=new AtomicReference<Path>();
         var requests=new java.util.concurrent.CopyOnWriteArrayList<String>();
         var first=new AtomicBoolean(true);
         var provider=com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);
@@ -37,7 +41,9 @@ class SkillDiscoverySmokeTest {
             boolean call=first.getAndSet(false);
             var item=json.createObjectNode().put("id",call?"fc-skill":"msg-skill").put("status","completed");
             if(call) {
-                var args=json.createObjectNode().put("script","from pathlib import Path;print(Path("+json.writeValueAsString(skill.toString())+").read_text())");
+                String command="from pathlib import Path;print(Path("+json.writeValueAsString(skill.toString())+").read_text())";
+                if(publicApi) command+="\nimport subprocess,sys\nresult=subprocess.run([sys.executable,'-I','-S',"+json.writeValueAsString(apiScript.toString())+",'--output',"+json.writeValueAsString(apiOutput.get().toString())+"])\nassert result.returncode==0";
+                var args=json.createObjectNode().put("script",command).put("timeout_seconds",90);
                 item.put("type","function_call").put("name","harness_execute").put("call_id","call-skill").put("arguments",args.toString());
             } else {
                 item.put("type","message").put("role","assistant");
@@ -60,11 +66,13 @@ class SkillDiscoverySmokeTest {
             runtime.setBaseUrl("http://127.0.0.1:"+provider.getAddress().getPort());runtime.setApiKey("synthetic-test-token");
             var properties=new AgentProperties();properties.setDataDir(data);properties.setCodexRequestTimeoutSeconds(20);
             properties.setWindowsPython(Path.of(System.getProperty("windows.isolation.python")));
+            if(publicApi)properties.setCommandNetworkMode(AgentProperties.CommandNetworkMode.PUBLIC);
             var skills=List.of(new CodexSkillInput("fixture-skill",skill.toString()));
             var options=new CodexThreadOptions("6",workspace,runtime).withExpertRuntime(skills,List.of()).withExecutionIdentity("38",key);
             String thread=null;
             for(int iteration=0;iteration<2;iteration++) {
                 first.set(true);requests.clear();
+                apiOutput.set(workspace.resolve("api-"+iteration+".json"));
                 try(var adapter=new AppServerCodexAdapter(properties,json)) {
                     if(thread==null)thread=adapter.startThread(options);else adapter.resumeThread(thread,options);
                     var finished=new CompletableFuture<String>();
@@ -73,13 +81,20 @@ class SkillDiscoverySmokeTest {
                         public void onApproval(CodexApproval approval) {finished.completeExceptionally(new AssertionError("Unexpected approval"));}
                         public void onCompleted(String id,String status,String reason) {finished.complete(status+":"+reason);}
                     });
-                    assertTrue(finished.get(50,TimeUnit.SECONDS).startsWith("completed:"));
+                    assertTrue(finished.get(publicApi?120:50,TimeUnit.SECONDS).startsWith("completed:"));
                     assertTrue(requests.size()>=2);
                     assertTrue(requests.getFirst().contains("SKILL_INDEX_FIXTURE"));
                     if(iteration==0)assertEquals(1,requests.getFirst().split("SKILL_INDEX_FIXTURE",-1).length-1);
                     if(iteration==0)assertFalse(requests.getFirst().contains("SKILL_BODY_FIXTURE"));
                     assertTrue(requests.getLast().contains("SKILL_BODY_FIXTURE"));
                     assertTrue(requests.stream().noneMatch(request->request.contains("UNUSED_SOURCE_FIXTURE")));
+                    if(publicApi) {
+                        var report=json.readTree(Files.readString(apiOutput.get()));
+                        assertEquals("PUBLIC_API_SCRIPT_OK",report.path("marker").asText());
+                        assertEquals(apiScript.toString(),report.path("entrypoint").asText());
+                        assertTrue(requests.getFirst().contains("Network mode: PUBLIC"));
+                        assertTrue(requests.getLast().contains("PUBLIC_API_SCRIPT_OK"));
+                    }
                 }
             }
         } finally {provider.stop(0);workers.shutdownNow();}

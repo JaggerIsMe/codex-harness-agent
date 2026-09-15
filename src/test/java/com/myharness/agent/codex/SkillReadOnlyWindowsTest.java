@@ -14,6 +14,40 @@ class SkillReadOnlyWindowsTest {
     @TempDir Path root;
     private final com.fasterxml.jackson.databind.ObjectMapper json=new com.fasterxml.jackson.databind.ObjectMapper();
 
+    @Test void validationSkillCalculatesInsideLpacWithoutResolvingHostParents() throws Exception {
+        Path workspace=Files.createDirectory(root.resolve("project")),data=Files.createDirectory(root.resolve("data"));
+        AgentStorage.protectDataDirectory(data);
+        Path fixtures=Path.of("../../examples/skill-validation/skills").toAbsolutePath().normalize();
+        Path source=fixtures.resolve("harness-validation-calculate"),pkg=AgentStorage.directory(data,"private/calculate");
+        try(var files=Files.walk(source)) {
+            for(Path file:files.toList()) {
+                Path target=pkg.resolve(source.relativize(file));
+                if(Files.isDirectory(file))Files.createDirectories(target);else Files.copy(file,target);
+            }
+        }
+        Path run=Files.createDirectories(workspace.resolve("skill-validation/lpac-probe"));
+        byte[] orders=Files.readAllBytes(fixtures.resolve("harness-validation-prepare/assets/orders.csv"));
+        Files.write(run.resolve("orders.csv"),orders);
+        String requestId=java.util.UUID.randomUUID().toString();
+        var prepared=json.createObjectNode().put("schema_version",1).put("state","PREPARED")
+                .put("fixture_id","orders-demo-v1").put("run_id","lpac-probe").put("request_id",requestId)
+                .put("prepare_marker","PREPARE_BODY_V1")
+                .put("input_sha256",java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(orders)));
+        Files.writeString(run.resolve("prepared.json"),json.writeValueAsString(prepared));
+        var scope=new SkillExecutionScope("validation",AgentStorage.directory(data,"skill-execution/validation"),List.of(pkg));
+        var properties=new com.myharness.agent.config.AgentProperties();properties.setDataDir(data);
+        properties.setWindowsPython(Path.of(System.getProperty("windows.isolation.python")));
+        var arguments=json.createObjectNode().put("program","python");
+        arguments.putArray("args").add(pkg.resolve("scripts/run_report.py").toString()).add("--run-dir").add(run.toString());
+        var result=WindowsCommandTool.execute(workspace,properties,arguments,json,scope);
+        assertEquals(0,result.exitCode(),result.output());
+        assertTrue(result.output().contains("CALCULATE_SCRIPT_V1"),result.output());
+        var report=json.readTree(Files.readString(run.resolve("calculation/report.json")));
+        assertEquals(14850,report.path("total_amount_cents").asInt());
+        assertEquals(requestId,report.path("request_id").asText());
+        assertFalse(Files.exists(pkg.resolve("scripts/__pycache__")));
+    }
+
     @Test void simultaneousCommandsInOneWorkspaceDoNotUnionSkillPermissions() throws Exception {
         Path workspace=Files.createDirectory(root.resolve("project")),data=Files.createDirectory(root.resolve("data"));
         AgentStorage.protectDataDirectory(data);

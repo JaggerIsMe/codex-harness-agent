@@ -10,6 +10,16 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class AgentPropertiesTest {
+    @Test void publicNetworkHasDistinctVerifiedWindowsCapability() {
+        var properties=new AgentProperties();
+        properties.setCommandNetworkMode(AgentProperties.CommandNetworkMode.PUBLIC);
+        assertThat(properties.isolationMode("Windows 10")).isEqualTo("UNSUPPORTED");
+        properties.confirmReadIsolation();
+        assertThat(properties.isolationMode("Windows 10")).isEqualTo("WINDOWS_LPAC_API_V3");
+        assertThat(properties.isolationMode("Linux")).isEqualTo("UNSUPPORTED");
+        properties.setCommandNetworkMode(AgentProperties.CommandNetworkMode.DISABLED);
+        assertThat(properties.isolationMode("Windows 10")).isEqualTo("WINDOWS_LPAC_SKILL_V2");
+    }
     @Test
     void jakartaValidationStillEnforcesIsolationAndNestedWorkspaceConstraints() {
         AgentProperties properties = new AgentProperties();

@@ -14,6 +14,12 @@ import static org.mockito.Mockito.*;
 class ProjectIsolationCheckTest {
     @TempDir Path data;
 
+    @Test void linuxCannotSilentlyOpenAllNetworkingForPublicApiMode() {
+        var properties=properties();properties.setCommandNetworkMode(AgentProperties.CommandNetworkMode.PUBLIC);
+        var failure=assertThrows(CodexException.class,()->new ProjectIsolationCheck(properties,new ObjectMapper()).initializeFor("Linux"));
+        assertTrue(failure.getMessage().contains("DISABLED"));assertEquals("UNSUPPORTED",properties.isolationMode("Linux"));
+    }
+
     @Test void missingWindowsRuntimeExplainsPreparationBeforeLaunchingCodex() {
         var properties=properties();
         Path python=data.resolve("runtime/python/python.exe");

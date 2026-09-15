@@ -33,7 +33,6 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public class AppServerCodexAdapter implements CodexGateway {
     private static final String CODEX_APPS_MCP_SERVER="codex_apps";
-    private static final String DISABLED_INHERITED_MCP_COMMAND="harness-disabled-mcp";
     private static final String INTERACTIVE_APPROVAL_POLICY="on-request";
     private java.util.Set<Path> expertSkillPaths=java.util.Set.of();
     private SkillExecutionScope executionScope;
@@ -96,6 +95,7 @@ public class AppServerCodexAdapter implements CodexGateway {
         disableInheritedMcpServers(params,options);
         if(nativeWindows()) WindowsExecutionTools.configure(params,true,supportsImageInput(options),controlledImages());
         if(nativeWindows()) WindowsExecutionTools.configureCommands(params,properties);
+        if(nativeWindows()) WindowsExecutionTools.configureNetwork(params,properties);
         if(options.isOrchestration()) OrchestrationOutcomeTool.configure(params);
         params.put("ephemeral", false);
         if(options.isIsolatedExpertRuntime()) configureSkillRoots(options.getWorkspace(),options.getExpertSkills());
@@ -186,13 +186,13 @@ public class AppServerCodexAdapter implements CodexGateway {
 
     private void markNativeThread(String threadId,Path workspace,boolean create) {
         try {
-            Path directory=properties.getDataDir().resolve("skill-readonly-threads-v1");
+            Path directory=properties.getDataDir().resolve(properties.isPublicCommandNetwork()?"public-api-threads-v1":"skill-readonly-threads-v1");
             Path marker=directory.resolve(java.util.UUID.nameUUIDFromBytes(threadId.getBytes(StandardCharsets.UTF_8))+".txt");
             String binding=workspace.toRealPath().toString();
             if(create) {java.nio.file.Files.createDirectories(directory);java.nio.file.Files.writeString(marker,binding);}
             else if(!java.nio.file.Files.isRegularFile(marker) || !java.nio.file.Files.readString(marker).equals(binding))
-                throw new CodexException("此会话尚未启用 Skill 按需读取；请新建会话，旧历史保持可查看");
-        } catch(IOException failure) {throw new CodexException("Cannot verify native Windows thread binding",failure);}
+                throw new CodexException("此会话与当前 Skill / 网络运行模式不兼容；请新建会话，旧历史保持可查看");
+        } catch(IOException failure) {throw new CodexException("Cannot verify command-mode thread binding",failure);}
     }
 
     private void prepareNativeWorkspace(Path workspace) {
@@ -204,7 +204,7 @@ public class AppServerCodexAdapter implements CodexGateway {
         if(java.nio.file.Files.exists(workspace.resolve(".codex/config.toml"),java.nio.file.LinkOption.NOFOLLOW_LINKS))
             throw new CodexException("Windows 隔离项目不加载 .codex/config.toml；请由管理员将需要的配置迁入受控 Agent 配置");
         {
-            var probe=WindowsIsolatedCommand.executeScoped(workspace,"pass",15,properties.getWindowsPython(),executionScope,List.of(),Map.of(),120);
+            var probe=WindowsIsolatedCommand.executeScoped(workspace,"pass",15,properties.getWindowsPython(),executionScope,List.of(),Map.of(),120,properties.isPublicCommandNetwork());
             if(probe.exitCode()!=0) throw new CodexException("Cannot initialize Windows project execution: "+probe.output());
         }
     }
@@ -341,6 +341,8 @@ public class AppServerCodexAdapter implements CodexGateway {
 
     /** A concrete project path, not all Device workspaces, is allowed in this profile. */
     private void configureProjectPermissions(ObjectNode params,Path workspace) {
+        if(properties.isPublicCommandNetwork() && !nativeWindows())
+            throw new CodexException("PUBLIC 命令网络当前仅支持 Windows LPAC；Linux 请配置 command-network-mode: DISABLED");
         String profile=profileId(workspace);
         params.put("permissions",profile);
         ObjectNode config=params.withObject("config");
@@ -459,7 +461,7 @@ public class AppServerCodexAdapter implements CodexGateway {
         if(!options.isIsolatedExpertRuntime()) return;
         JsonNode raw=params.get("config");
         ObjectNode config=raw instanceof ObjectNode object ? object : params.putObject("config");
-        // Plugin MCP discovery is separate from the initial mcpServerStatus inventory.
+        // Plugin MCP discovery is separate from standard mcp_servers configuration.
         // Only the Expert's explicitly supplied skills and MCP runtimes belong to this thread.
         config.withObject("features").put("apps",false).put("plugins",false);
         if(!options.getMcpServers().isEmpty()) {
@@ -502,13 +504,19 @@ public class AppServerCodexAdapter implements CodexGateway {
         java.util.Set<String> allowed=options.getMcpServers().stream().map(com.myharness.agent.entity.dto.McpRuntimeDTO::getServerCode)
                 .collect(java.util.stream.Collectors.toSet());
         ObjectNode servers=(ObjectNode)threadParams.path("config").path("mcp_servers");
-        for(JsonNode status:mcpStatuses(null)) {
-            String name=status.path("name").asText();
+        ObjectNode read=objectMapper.createObjectNode().put("cwd",options.getWorkspace().toString());
+        JsonNode inherited=request("config/read",read).path("config").path("mcp_servers");
+        var entries=inherited.fields();
+        while(entries.hasNext()) {
+            var entry=entries.next();String name=entry.getKey();JsonNode server=entry.getValue();
             if(CODEX_APPS_MCP_SERVER.equals(name)) continue;
+            // Discovery also lists app/plugin services without a standard configured transport.
+            // Only override actual server definitions; feature flags and verifyMcpIsolation handle discovery.
+            if(!hasText(server.path("command").asText(null)) && !hasText(server.path("url").asText(null))) continue;
             if(!name.isBlank() && !allowed.contains(name)) {
-                // Session MCP overrides replace the complete server entry instead of deep-merging it.
-                // Keep the disabled entry parseable without copying inherited commands, arguments or secrets.
-                servers.putObject(name).put("command",DISABLED_INHERITED_MCP_COMMAND).put("enabled",false);
+                // Codex merges session overrides with inherited server fields before validating them.
+                // Preserve the transport: adding a placeholder command conflicts with an inherited HTTP URL.
+                servers.putObject(name).put("enabled",false);
             }
         }
     }

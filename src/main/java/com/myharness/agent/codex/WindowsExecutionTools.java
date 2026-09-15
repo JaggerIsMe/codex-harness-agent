@@ -67,6 +67,21 @@ final class WindowsExecutionTools {
         fields.putObject("args").put("type","array").put("maxItems",128).putObject("items").put("type","string").put("maxLength",8000);
         fields.putObject("timeout_seconds").put("type","integer").put("minimum",1).put("maximum",1800);
     }
+    static void configureNetwork(ObjectNode params,com.myharness.agent.config.AgentProperties properties) {
+        String policy=properties.isPublicCommandNetwork()
+                ? " Network mode: PUBLIC. Outbound public Internet requests, including HTTP/HTTPS APIs, are available to scripts and child processes. Windows network isolation still applies; no private-network capability, inbound-server capability or loopback exemption is granted. TLS certificate verification must remain enabled. Dependencies must already be available."
+                : " Network mode: DISABLED. Commands and child processes cannot access the network.";
+        for(var tool:params.path("dynamicTools")) {
+            String name=tool.path("name").asText();
+            if(NAME.equals(name)||WindowsCommandTool.NAME.equals(name)) {
+                String description=tool.path("description").asText()
+                        .replace("external user files and command networking are inaccessible", "external user files are inaccessible")
+                        .replace("Processes cannot read external private files or access the network.", "Processes can read only authorized files, including the current Skill directories.")
+                        .replace("per-project execution directory", "per-run execution directory");
+                ((ObjectNode)tool).put("description",description+policy);
+            }
+        }
+    }
     static String textArgument(JsonNode args,String field,int limit) {
         if(!args.isObject()||args.size()!=1||!args.path(field).isTextual()||args.path(field).asText().isBlank()||args.path(field).asText().length()>limit)
             throw new CodexException("Invalid tool arguments: expected only "+field);
@@ -97,7 +112,7 @@ final class WindowsExecutionTools {
             String key=fields.next();if(!key.equals("script") && !key.equals("timeout_seconds")) throw new CodexException("Unsupported isolated command field: "+key);
         }
         if(arguments.has("timeout_seconds") && !arguments.path("timeout_seconds").isIntegralNumber()) throw new CodexException("Command timeout must be an integer");
-        if(scope!=null)return WindowsIsolatedCommand.executeScoped(workspace,arguments.path("script").asText(),arguments.path("timeout_seconds").asInt(60),properties.getWindowsPython(),scope,List.of(),java.util.Map.of(),120);
+        if(scope!=null)return WindowsIsolatedCommand.executeScoped(workspace,arguments.path("script").asText(),arguments.path("timeout_seconds").asInt(60),properties.getWindowsPython(),scope,List.of(),java.util.Map.of(),120,properties.isPublicCommandNetwork());
         return WindowsIsolatedCommand.execute(workspace,arguments.path("script").asText(),arguments.path("timeout_seconds").asInt(60),properties.getWindowsPython(),com.myharness.agent.workspace.AgentStorage.executionDirectory(properties.getDataDir(),workspace));
     }
 }

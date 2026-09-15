@@ -33,6 +33,8 @@ harness:
     codex-command: codex
     responses-history-compatibility: true
     strict-project-isolation: true
+    # Windows 公网 API 出站访问；DISABLED 恢复禁网。Linux 暂仅支持 DISABLED。
+    command-network-mode: PUBLIC
     windows-sandbox: elevated
     windows-python: ${project.folder}/runtime/python/python.exe
     codex-request-timeout-seconds: 30

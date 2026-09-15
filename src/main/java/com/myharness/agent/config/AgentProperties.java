@@ -61,6 +61,12 @@ public class AgentProperties {
 
     private boolean strictProjectIsolation = true;
 
+    public enum CommandNetworkMode { DISABLED, PUBLIC }
+    @NotNull private CommandNetworkMode commandNetworkMode=CommandNetworkMode.DISABLED;
+    public CommandNetworkMode getCommandNetworkMode(){return commandNetworkMode;}
+    public void setCommandNetworkMode(CommandNetworkMode value){commandNetworkMode=value;}
+    public boolean isPublicCommandNetwork(){return commandNetworkMode==CommandNetworkMode.PUBLIC;}
+
     @Min(0) private int maxWorkspaces;
     public int getMaxWorkspaces() { return maxWorkspaces; }
     public void setMaxWorkspaces(int value) { maxWorkspaces=value; }
@@ -81,8 +87,8 @@ public class AgentProperties {
 
     public String isolationMode(String osName) {
         if(!strictProjectIsolation || !readIsolationVerified) return "UNSUPPORTED";
-        if("Linux".equalsIgnoreCase(osName)) return "LINUX_PROJECT_SKILL_V2";
-        if(osName!=null && osName.startsWith("Windows")) return "WINDOWS_LPAC_SKILL_V2";
+        if("Linux".equalsIgnoreCase(osName)) return isPublicCommandNetwork()?"UNSUPPORTED":"LINUX_PROJECT_SKILL_V2";
+        if(osName!=null && osName.startsWith("Windows")) return isPublicCommandNetwork()?"WINDOWS_LPAC_API_V3":"WINDOWS_LPAC_SKILL_V2";
         return "UNSUPPORTED";
     }
 

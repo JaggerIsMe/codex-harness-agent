@@ -96,7 +96,7 @@ final class WindowsCommandTool {
         String script = "import base64,json,subprocess,sys,os\nargv=json.loads(base64.b64decode('" + encoded + "'))\n"
                 + (batch ? "q=chr(34)\nargv=q+os.environ['ComSpec']+q+' /d /s /c '+q+' '.join(q+arg+q for arg in argv)+q\n" : "")
                 + "result=subprocess.run(argv,shell=False)\nsys.exit(result.returncode)";
-        if(scope!=null)return WindowsIsolatedCommand.executeScoped(project,script,timeout,python,scope,homes,environment,1800);
+        if(scope!=null)return WindowsIsolatedCommand.executeScoped(project,script,timeout,python,scope,homes,environment,1800,properties.isPublicCommandNetwork());
         return WindowsIsolatedCommand.executeTool(project, script, timeout, python, com.myharness.agent.workspace.AgentStorage.executionDirectory(properties.getDataDir(), project), homes, environment);
     }
 }
