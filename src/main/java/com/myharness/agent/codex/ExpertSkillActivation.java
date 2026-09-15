@@ -1,7 +1,6 @@
 package com.myharness.agent.codex;
 
 import com.myharness.agent.attachment.AttachmentPreparation;
-import com.myharness.agent.workspace.WorkspaceRegistry;
 import java.io.IOException;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
@@ -11,22 +10,19 @@ import java.util.*;
 final class ExpertSkillActivation {
     private static final String MARKER=".harness-expert-managed";
     private static final String OWNER="harness-project-expert-v1";
-    static List<CodexSkillInput> sync(WorkspaceRegistry registry,String workspace,String relativeRoot,List<CodexSkillInput> cached,AttachmentPreparation cancellation) {
+    static List<CodexSkillInput> sync(Path root,List<CodexSkillInput> cached,AttachmentPreparation cancellation) {
         try {
-            Path root=registry.resolve(workspace,relativeRoot);
-            Files.createDirectories(root);root=registry.resolve(workspace,relativeRoot).toRealPath();
-            if(!root.equals(registry.resolve(workspace,"").resolve(relativeRoot)))
-                throw new CodexException("专家运行目录不能重定向到其他目录");
+            if(!root.equals(root.toRealPath()))throw new CodexException("专家运行目录不能重定向到其他目录");
             Set<String> desired=new HashSet<>();List<CodexSkillInput> active=new ArrayList<>();
             for(var skill:cached) {
                 cancellation.check();Path source=Path.of(skill.path()).getParent().toRealPath();
                 String name="harness-expert-"+source.getFileName().toString().substring("harness-".length());
-                desired.add(name);Path target=registry.resolve(workspace,relativeRoot+"/"+name);
-                if(!target.equals(root.resolve(name))) throw new CodexException("专家 Skill 安装目录不能是链接："+name);
+                desired.add(name);Path target=root.resolve(name);
+                if(Files.exists(target,LinkOption.NOFOLLOW_LINKS) && !target.equals(target.toRealPath())) throw new CodexException("专家 Skill 安装目录不能是链接："+name);
                 if(Files.exists(target,LinkOption.NOFOLLOW_LINKS)) {
                     if(!owned(target)) throw new CodexException("专家 Skill 安装目录与已有文件冲突："+name);
                 } else {
-                    Path staging=registry.resolve(workspace,".harness/expert-skills/activation-"+UUID.randomUUID());
+                    Path staging=root.resolve("activation-"+UUID.randomUUID());
                     try {
                         copy(source,staging,cancellation);
                         Files.writeString(staging.resolve(MARKER),OWNER);
@@ -35,7 +31,7 @@ final class ExpertSkillActivation {
                         catch(AtomicMoveNotSupportedException ignored){Files.move(staging,target);}
                     } finally {if(Files.exists(staging,LinkOption.NOFOLLOW_LINKS)) delete(staging);}
                 }
-                active.add(new CodexSkillInput(skill.name(),registry.resolve(workspace,relativeRoot+"/"+name+"/SKILL.md").toString()));
+                active.add(new CodexSkillInput(skill.name(),root.resolve(name).resolve("SKILL.md").toString()));
             }
             cancellation.check();
             try(var children=Files.list(root)) {

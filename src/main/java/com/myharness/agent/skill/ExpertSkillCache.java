@@ -206,9 +206,7 @@ public class ExpertSkillCache {
 
     private Path scopeRoot(String workspaceName) {
         try {
-            Path requested=workspaceRegistry.resolve(workspaceName,".harness/expert-skills");
-            Files.createDirectories(requested);
-            return workspaceRegistry.resolve(workspaceName,".harness/expert-skills").toRealPath();
+            return workspaceRegistry.privateDirectory(workspaceName,"expert-skills").toRealPath();
         } catch(IOException | RuntimeException error) {throw new SkillException("Unable to prepare expert Skill cache",error);}
     }
 

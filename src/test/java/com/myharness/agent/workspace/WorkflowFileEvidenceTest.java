@@ -10,7 +10,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class WorkflowFileEvidenceTest {
     @TempDir Path temporary;
-    @Test void checksRealBytesAndRejectsMissingProtectedDirectoriesAndHardLinks() throws Exception {
+    @Test void checksUserDotfileBytesAndRejectsEscapesDirectoriesAndHardLinks() throws Exception {
         Path root=Files.createDirectory(temporary.resolve("workspace"));
         var settings=new AgentProperties();settings.setDataDir(temporary.resolve("data"));
         var workspace=new WorkspaceProperties();workspace.setName("demo");workspace.setPath(root);settings.setWorkspaces(List.of(workspace));
@@ -22,7 +22,9 @@ class WorkflowFileEvidenceTest {
         assertEquals(before,WorkflowFileEvidence.fingerprint(registry,"demo","reports/data.xlsx"));
         Files.writeString(root.resolve("reports/data.xlsx"),"updated");
         assertNotEquals(before,WorkflowFileEvidence.fingerprint(registry,"demo","reports/data.xlsx"));
-        for(String path:List.of("../private",".codex/auth.json","reports"))assertEquals("UNVERIFIED",WorkflowFileEvidence.fingerprint(registry,"demo",path));
+        Files.createDirectory(root.resolve(".codex"));Files.writeString(root.resolve(".codex/user.json"),"original");
+        assertEquals(before,WorkflowFileEvidence.fingerprint(registry,"demo",".codex/user.json"));
+        for(String path:List.of("../private","reports"))assertEquals("UNVERIFIED",WorkflowFileEvidence.fingerprint(registry,"demo",path));
         Files.createLink(root.resolve("linked.xlsx"),root.resolve("reports/data.xlsx"));
         assertEquals("UNVERIFIED",WorkflowFileEvidence.fingerprint(registry,"demo","linked.xlsx"));
     }

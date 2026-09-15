@@ -8,21 +8,11 @@ import java.security.MessageDigest;
 import java.util.*;
 
 final class WorkspacePathPolicy {
-    private static final Set<String> PROTECTED=Set.of(".codex",".git",".harness",".agent",".agents",".harness-workspace.json");
     private final WorkspaceRegistry workspaces;
     private final String instance=UUID.randomUUID().toString();
     WorkspacePathPolicy(WorkspaceRegistry workspaces){this.workspaces=workspaces;}
-    static boolean visible(String path) {
-        if(path==null)return false;
-        for(String part:path.split("/")) {
-            String lower=part.toLowerCase(Locale.ROOT);
-            if(PROTECTED.contains(lower)||lower.startsWith(".harness-upload-"))return false;
-        }
-        return true;
-    }
     Path checked(String workspace,String relative) throws IOException {
         WorkspaceFileService.validateRelative(relative);
-        if(!visible(relative))throw new WorkspaceFileException("PROTECTED_PATH","不能访问受保护的工作区路径");
         Path root=workspaces.resolve(workspace,"").toRealPath();Path target=root;
         if(!relative.isEmpty())for(String segment:relative.split("/")) {
             target=target.resolve(segment);

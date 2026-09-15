@@ -157,12 +157,12 @@ class CodexAppServerSmokeTest {
 
     @Test
     @EnabledIfSystemProperty(named = "codex.turn.smoke", matches = "true")
-    void repliesWhenExpertSkillsAreAvailableWithoutBeingForced(@TempDir Path workspace) throws Exception {
-        Path skill=workspace.resolve(".harness/expert-runtimes/1/"+"a".repeat(64)+"/skills/harness-expert-1-1/SKILL.md");
+    void repliesWhenExpertSkillsAreAvailableWithoutBeingForced(@TempDir Path workspace,@TempDir Path data) throws Exception {
+        Path skill=com.myharness.agent.workspace.AgentStorage.workspaceRoot(data,workspace).resolve("expert-runtimes/1/"+"a".repeat(64)+"/skills/harness-expert-1-1/SKILL.md");
         java.nio.file.Files.createDirectories(skill.getParent());
         java.nio.file.Files.writeString(skill,"---\nname: available-probe\ndescription: Optional expertise for Java code review.\n---\nReview Java code when requested.\n");
         var available=List.of(new CodexSkillInput("available-probe",skill.toString()));
-        AgentProperties properties=new AgentProperties();properties.setCodexRequestTimeoutSeconds(45);
+        AgentProperties properties=new AgentProperties();properties.setDataDir(data);properties.setCodexRequestTimeoutSeconds(45);
         try(var adapter=new AppServerCodexAdapter(properties,new ObjectMapper())) {
             String threadId=adapter.startThread(new CodexThreadOptions("expert-turn-smoke",workspace,null).withExpertSkills(available));
             assertReply(adapter,threadId,new CodexTurnInput(

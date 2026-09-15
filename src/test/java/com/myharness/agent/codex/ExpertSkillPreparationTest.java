@@ -41,18 +41,18 @@ class ExpertSkillPreparationTest {
     }
     @Test void activatesCompletePackageOutsideSharedDiscoveryDirectory() throws Exception {
         var ready=preparation.prepare(turn,new AttachmentPreparation());
-        assertTrue(Path.of(ready.getFirst().path()).startsWith(workspace.resolve(".harness/expert-runtimes/1")));
+        assertTrue(Path.of(ready.getFirst().path()).startsWith(com.myharness.agent.workspace.AgentStorage.workspaceRoot(properties.getDataDir(),workspace).resolve("expert-runtimes/1")));
         assertEquals("resource",Files.readString(Path.of(ready.getFirst().path()).getParent().resolve("references/example.txt")));
         assertFalse(Files.exists(workspace.resolve(".agents/skills/harness-expert-1-1")));
     }
-    @Test void conversationsHaveDifferentImmutableRootsAndShareOnlyCache() {
+    @Test void conversationsHaveDifferentImmutableRootsAndShareOnlyCache() throws Exception {
         var first=preparation.prepare(turn,new AttachmentPreparation());
         turn.setConversationId("2");turn.setTurnId("2");turn.getExpertRuntime().setRuntimeKey("b".repeat(64));
         var second=preparation.prepare(turn,new AttachmentPreparation());
         assertNotEquals(first,second);
         assertTrue(Files.exists(Path.of(first.getFirst().path())));
         assertTrue(Files.exists(Path.of(second.getFirst().path())));
-        assertTrue(Files.exists(workspace.resolve(".harness/expert-skills/harness-1-1/SKILL.md")));
+        assertTrue(Files.exists(com.myharness.agent.workspace.AgentStorage.workspaceRoot(properties.getDataDir(),workspace).resolve("expert-skills/harness-1-1/SKILL.md")));
     }
     @Test void switchingAndClearingDoNotDeleteAnotherRunningConversationsFiles() {
         var first=preparation.prepare(turn,new AttachmentPreparation());

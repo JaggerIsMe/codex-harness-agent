@@ -68,11 +68,14 @@ public class ProjectIsolationCheck {
                     child=subprocess.run([os.environ['ComSpec'],'/d','/c','type',str(outside)],capture_output=True)
                     assert b'OUTSIDE' not in child.stdout and child.stderr
                     assert not os.environ.get('HARNESS_MODEL_API_KEY')
-                    try: Path('.codex/probe').write_text('CHANGED')
-                    except PermissionError: pass
-                    else: raise AssertionError('metadata write allowed')
+                    assert not Path('.codex').exists()
+                    Path('.codex').mkdir()
+                    Path('.codex/probe').write_text('USER_CONFIG')
+                    temp=Path(os.environ['TEMP'])
+                    assert not temp.is_relative_to(Path.cwd())
+                    (temp/'probe.txt').write_text('TEMP_OK')
                     print('HARNESS_ISOLATION_OK')
-                    """.formatted(json.writeValueAsString(outside.toAbsolutePath().toString())),30,properties.getWindowsPython());
+                    """.formatted(json.writeValueAsString(outside.toAbsolutePath().toString())),30,properties.getWindowsPython(),Files.createDirectory(root.resolve("execution")));
             if(result.exitCode()!=0 || !result.output().lines().anyMatch("HARNESS_ISOLATION_OK"::equals)
                     || !Files.readString(outside).equals("OUTSIDE") || !Files.readString(project.resolve("created.txt")).equals("WRITE_OK"))
                 throw new CodexException("Windows LPAC isolation self-test failed; execution remains disabled: "+result.output());
@@ -106,7 +109,7 @@ public class ProjectIsolationCheck {
                     printf 'HARNESS_ISOLATION_OK\\n'
                     """);
             var command=new ArrayList<String>(List.of(properties.getCodexCommand(),"sandbox","-P","harness-isolation-check","-C",workspace.toString()));
-            command.addAll(ProjectPermissionProfile.commandOverrides(json,"harness-isolation-check"));
+            command.addAll(ProjectPermissionProfile.commandOverrides(json,"harness-isolation-check",root,workspace));
             command.addAll(List.of("--","/bin/sh",script.toString(),outside.toString()));
             Path output=root.resolve("probe-output.txt");
             process=launch(command,workspace,output);

@@ -15,9 +15,26 @@ final class ProjectPermissionProfile {
         filesystem.put(":root","deny").put(":minimal","read").put(":tmpdir","deny").put(":slash_tmp","deny");
         if("Linux".equalsIgnoreCase(System.getProperty("os.name")))
             filesystem.put(System.getProperty("java.home"),"read");
-        filesystem.putObject(":workspace_roots").put(".","write").put(".git","read").put(".codex","read");
+        filesystem.putObject(":workspace_roots").put(".","write").put(".git","write").put(".codex","write").put(".agent","write").put(".agents","write");
         policy.putObject("network").put("enabled",false);
         return policy;
+    }
+    static ObjectNode policy(ObjectMapper json,java.nio.file.Path data,java.nio.file.Path workspace) {
+        var policy=policy(json);
+        try {
+            var files=policy.withObject("filesystem");
+            java.nio.file.Files.createDirectories(data);
+            files.put(data.toRealPath().toString(),"deny");
+            files.put(workspace.toRealPath().toString(),"write");
+            files.put(com.myharness.agent.workspace.AgentStorage.executionDirectory(data,workspace).toString(),"write");
+        } catch(java.io.IOException failure) {throw new CodexException("Cannot prepare project storage permissions",failure);}
+        return policy;
+    }
+
+    static List<String> commandOverrides(ObjectMapper json,String name,java.nio.file.Path data,java.nio.file.Path workspace) {
+        var result=new ArrayList<String>();
+        flatten("permissions.\""+name+"\"",policy(json,data,workspace),result);
+        return result;
     }
     static List<String> commandOverrides(ObjectMapper json,String name) {
         var result=new ArrayList<String>();

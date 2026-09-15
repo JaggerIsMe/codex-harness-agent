@@ -39,14 +39,14 @@ class ExpertSkillCacheTest {
     }
     @Test void requiresAuthorizedWorkspace() throws Exception {
         Path zip=archive("SKILL.md");var properties=new AgentProperties();properties.setDataDir(root.resolve("data"));
-        var registry=mock(WorkspaceRegistry.class);when(registry.resolve(anyString(),anyString())).thenThrow(new IllegalArgumentException("not authorized"));
+        var registry=mock(WorkspaceRegistry.class);when(registry.privateDirectory(anyString(),anyString())).thenThrow(new IllegalArgumentException("not authorized"));
         var cache=new ExpertSkillCache(properties,mock(SkillDownloadClient.class),registry);
         assertThrows(SkillException.class,()->cache.prepare(request(zip,"7-10","unknown"),null));
     }
     private ExpertSkillCache cache(Path zip,AtomicInteger count) {
         var properties=new AgentProperties();properties.setDataDir(root.resolve("data"));
         var registry=mock(WorkspaceRegistry.class);
-        when(registry.resolve(anyString(),eq(".harness/expert-skills"))).thenAnswer(i->root.resolve(i.getArgument(0,String.class)).resolve(".harness/expert-skills"));
+        when(registry.privateDirectory(anyString(),eq("expert-skills"))).thenAnswer(i->Files.createDirectories(root.resolve("data/workspace-private").resolve(i.getArgument(0,String.class)).resolve("expert-skills")));
         return new ExpertSkillCache(properties,(url,target,max)->{try{Files.copy(zip,target);count.incrementAndGet();}catch(Exception e){throw new SkillException("fixture",e);}},registry);
     }
     private ExpertSkillCacheRequest request(Path zip,String id,String workspace) throws Exception {

@@ -6,7 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.file.*;
 import java.util.Set;
 
-/** A private capability projection. Model identity, authentication and user configuration stay native. */
+/** Private Harness runtime projection; never changes the source model catalog or credentials. */
 final class QuestionToolCatalog {
     private static final Set<String> ASYNC=Set.of("request_user_input_async","send_user_message_async");
     private final ObjectMapper json;
@@ -24,6 +24,10 @@ final class QuestionToolCatalog {
         ObjectNode catalog=read(source);
         for(var model:catalog.path("models")) {
             if(!model.isObject())throw new CodexException("Codex 模型目录格式无效");
+            // Native mode templates override collaborationMode.settings.developer_instructions.
+            // Harness supplies its expert/Skill/confirmation instructions on every Turn, so use
+            // Codex's per-turn mode instructions instead. Preserve base instructions and permissions.
+            if(model.path("model_messages") instanceof ObjectNode messages) messages.remove("collaboration_modes");
             JsonNode tools=model.path("experimental_supported_tools");
             if(tools.isMissingNode()||tools.isNull())continue;
             if(!tools.isArray())throw new CodexException("Codex 模型工具能力格式无效");

@@ -36,11 +36,10 @@ public class ExpertSkillPreparation {
                 throw new AgentOperationException("EXPERT_CONFIG_INVALID","专家 Skill 配置无效");
             ExpertSkillCacheRequest command=new ExpertSkillCacheRequest(skill.getSkillId()+"-"+skill.getVersionId(),
                     skill.getVersion(),skill.getDownloadUrl(),skill.getSha256(),turn.getWorkspaceName());
-            skills.prepare(command,cancellation); cancellation.check();
-            var path=workspaces.resolve(turn.getWorkspaceName(),".harness/expert-skills/harness-"+command.skillId()+"/SKILL.md");
+            var path=skills.prepare(command,cancellation).resolve("SKILL.md"); cancellation.check();
             result.add(new CodexSkillInput(skill.getName(),path.toString()));
         }
-        return ExpertSkillActivation.sync(workspaces,turn.getWorkspaceName(),
-                ".harness/expert-runtimes/"+turn.getConversationId()+"/"+runtime.getRuntimeKey()+"/skills",result,cancellation);
+        return ExpertSkillActivation.sync(workspaces.privateDirectory(turn.getWorkspaceName(),
+                "expert-runtimes/"+turn.getConversationId()+"/"+runtime.getRuntimeKey()+"/skills"),result,cancellation);
     }
 }

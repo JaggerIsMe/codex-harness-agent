@@ -87,7 +87,7 @@ class WorkspaceFileServiceTest {
         var conflict=service.execute("RELOCATE_WORKSPACE_ENTRY",action("102","a.txt","b.txt",revision("a.txt"),null,null,null));
         assertFalse(conflict.success());assertEquals("TARGET_EXISTS",conflict.code());assertEquals("first",Files.readString(root.resolve("b.txt")));
     }
-    @Test void directoryRenameAndSingleFileMovePreserveContentsAndRejectProtectedDescendants() throws Exception {
+    @Test void directoryRenameAndSingleFileMovePreserveDotfileDescendants() throws Exception {
         Assumptions.assumeTrue(WindowsWorkspaceHandles.supported());
         Files.createDirectories(root.resolve("docs/sub"));Files.writeString(root.resolve("docs/sub/a.txt"),"content");
         var renamed=service.execute("RELOCATE_WORKSPACE_ENTRY",action("110","docs","reports",revision("docs"),null,null,null));
@@ -95,8 +95,14 @@ class WorkspaceFileServiceTest {
         var moved=service.execute("RELOCATE_WORKSPACE_ENTRY",action("111","reports/sub/a.txt","a.txt",revision("reports/sub/a.txt"),null,null,null));
         assertTrue(moved.success(),moved.error());
         Files.createDirectory(root.resolve("reports/.agent"));
-        var blocked=service.execute("RELOCATE_WORKSPACE_ENTRY",action("112","reports","secret",revision("reports"),null,null,null));
-        assertEquals("PROTECTED_PATH",blocked.code());assertTrue(Files.exists(root.resolve("reports/.agent")));
+        Files.writeString(root.resolve("reports/.agent/user.txt"),"user metadata");
+        var relocated=service.execute("RELOCATE_WORKSPACE_ENTRY",action("112","reports","secret",revision("reports"),null,null,null));
+        assertTrue(relocated.success(),relocated.error());
+        assertEquals("user metadata",Files.readString(root.resolve("secret/.agent/user.txt")));
+        var planned=service.execute("PREPARE_WORKSPACE_DELETE",action("113","secret",null,revision("secret"),null,null,null));
+        assertTrue(planned.success(),planned.error());assertEquals(1,planned.plan().fileCount());
+        var deleted=service.execute("DELETE_WORKSPACE_ENTRY",action("114","secret",null,null,planned.plan().planId(),planned.plan().planDigest(),null));
+        assertTrue(deleted.success(),deleted.error());assertFalse(Files.exists(root.resolve("secret")));
     }
     @Test void deleteChecksWholeSubtreeAndConsumesEachPlanOnlyOnce() throws Exception {
         Assumptions.assumeTrue(WindowsWorkspaceHandles.supported());
@@ -216,6 +222,24 @@ class WorkspaceFileServiceTest {
         assertEquals("UNKNOWN",service.execute("RECONCILE_WORKSPACE_OPERATION",current).status());
     }
 
+    @Test void managesFormerlyHiddenWorkspaceDirectoriesAfterPrivateStorageMigration() throws Exception {
+        int id=1000;
+        for(String name:List.of(".git",".codex",".agent",".agents",".harness")) {
+            var created=service.execute("CREATE_WORKSPACE_DIRECTORY",command(String.valueOf(id++),name,"",0,null));
+            assertTrue(created.success(),name+": "+created.error());
+            String file=name+"/user.txt";
+            var uploaded=service.execute("UPLOAD_WORKSPACE_FILE",command(String.valueOf(id++),file,"",content.length,sha(content)));
+            assertTrue(uploaded.success(),uploaded.error());
+            var listing=service.execute("SYNC_WORKSPACE_TREE",command(String.valueOf(id++),name,"",0,null));
+            assertTrue(listing.success(),listing.error());
+            assertEquals(file,listing.entries().getFirst().path());
+            var download=service.execute("PREPARE_WORKSPACE_DOWNLOAD",command(String.valueOf(id++),file,"",0,null));
+            assertTrue(download.success(),download.error());assertArrayEquals(content,received);
+        }
+        assertEquals(Set.of(".git",".codex",".agent",".agents",".harness"),
+                new HashSet<>(service.execute("SYNC_WORKSPACE_TREE",command(String.valueOf(id),"","",0,null)).entries().stream().map(e->e.name()).toList()));
+        assertThrows(java.io.IOException.class,()->service.checkedPath("demo","../agent/workspace-private",false));
+    }
     @Test void paginatesWithoutMissingEntriesAndPreservesEmptyDirectories() throws Exception {
         for(int i=0;i<205;i++) Files.writeString(root.resolve(String.format("file-%03d.txt",i)),"x");
         Files.createDirectory(root.resolve("empty"));
@@ -225,9 +249,9 @@ class WorkspaceFileServiceTest {
         var first=service.execute("SYNC_WORKSPACE_TREE",command("1","","",0,null));
         assertTrue(first.success(),first.error());assertEquals(200,first.entries().size());assertNotNull(first.nextCursor());
         var second=service.execute("SYNC_WORKSPACE_TREE",command("2","",first.nextCursor(),0,null));
-        assertTrue(second.success(),second.error());assertEquals(6,second.entries().size());assertNull(second.nextCursor());
+        assertTrue(second.success(),second.error());assertEquals(13,second.entries().size());assertNull(second.nextCursor());
         Set<String> names=new HashSet<>();first.entries().forEach(e -> names.add(e.name()));second.entries().forEach(e -> names.add(e.name()));
-        assertEquals(206,names.size());
+        assertEquals(213,names.size());
         var empty=service.execute("SYNC_WORKSPACE_TREE",command("3","empty","",0,null));
         assertTrue(empty.success());assertEquals(List.of(),empty.entries());
     }
@@ -246,16 +270,16 @@ class WorkspaceFileServiceTest {
         assertEquals(sha(received),downloaded.sha256());
         try(var paths=Files.list(root.resolve("docs"))) {assertEquals(1,paths.count());}
     }
-    @Test void hidesInternalFilesAtEveryLevelButKeepsOrdinaryDotfiles() throws Exception {
+    @Test void listsDotfilesAtEveryLevelAfterPrivateStorageMigration() throws Exception {
         Path docs=Files.createDirectory(root.resolve("docs"));
         for(String name:List.of(".CODEX", ".git", ".harness", ".agent", ".agents", ".gitignore", ".env.example"))
             Files.writeString(docs.resolve(name),"content");
         var tree=service.execute("SYNC_WORKSPACE_TREE",command("1","docs","",0,null));
         assertTrue(tree.success(),tree.error());
-        assertEquals(List.of(".env.example",".gitignore"),tree.entries().stream().map(e -> e.name()).toList());
+        assertEquals(List.of(".CODEX",".agent",".agents",".env.example",".git",".gitignore",".harness"),tree.entries().stream().map(e -> e.name()).toList());
         Files.createDirectories(docs.resolve("sub/.harness/nested"));
         var hidden=service.execute("SYNC_WORKSPACE_TREE",command("2","docs/sub/.harness/nested","",0,null));
-        assertFalse(hidden.success());assertTrue(hidden.entries().isEmpty());
+        assertTrue(hidden.success(),hidden.error());assertTrue(hidden.entries().isEmpty());
     }
     @Test void checksumFailureAndRevocationLeaveNoWorkspaceFile() throws Exception {
         var failed=service.execute("UPLOAD_WORKSPACE_FILE",command("1","file.txt","",content.length,"0".repeat(64)));
@@ -264,11 +288,11 @@ class WorkspaceFileServiceTest {
         assertFalse(service.execute("CREATE_WORKSPACE_DIRECTORY",command("2","forbidden","",0,null)).success());
         try(var paths=Files.list(root)) {assertEquals(0,paths.count());}
     }
-    @Test void rejectsTraversalAbsolutePathsAndProtectedWrites() throws Exception {
+    @Test void rejectsTraversalAndAbsolutePathsButAllowsDotfileWrites() throws Exception {
         for(String path:List.of("../secret","/root/file","C:/file","a\\b","a//b","a/../b","file:stream","CON.txt","name. "))
             assertThrows(java.io.IOException.class,() -> service.checkedPath("demo",path,true),path);
         for(String path:List.of(".git/config",".codex/config.toml",".agents/skills/a",".harness-workspace.json"))
-            assertThrows(java.io.IOException.class,() -> service.checkedPath("demo",path,true));
+            assertEquals(root.resolve(path),service.checkedPath("demo",path,true));
         assertThrows(RuntimeException.class,() -> service.checkedPath("other","file.txt",false));
     }
     @Test void refusesLinksEvenWhenTheyPointInsideWorkspace() throws Exception {

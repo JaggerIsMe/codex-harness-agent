@@ -86,7 +86,6 @@ public class WorkspaceFileService {
 
     private WorkspaceFileResultDTO list(WorkspaceFileCommandDTO c) throws IOException {
         Path directory=checkedPath(c.workspaceName(),c.path(),false);
-        if (!visiblePath(c.path())) throw new IOException("内部目录不在工作区目录树中展示");
         if (!Files.isDirectory(directory,LinkOption.NOFOLLOW_LINKS)) throw new IOException("目录不存在");
         String cursor=c.cursor()==null ? "" : c.cursor();
         Comparator<Path> order=Comparator.comparing(p -> p.getFileName().toString());
@@ -97,7 +96,7 @@ public class WorkspaceFileService {
             for(Path p:stream) {
                 if (++visited>200000 || System.nanoTime()>deadline) throw new IOException("目录过大，请缩小目录范围后重试");
                 String name=p.getFileName().toString();
-                if (!visiblePath(name) || name.compareTo(cursor)<=0) continue;
+                if (name.compareTo(cursor)<=0) continue;
                 candidates.add(p);
                 if (candidates.size()>PAGE_SIZE+1) candidates.poll();
             }
@@ -121,10 +120,6 @@ public class WorkspaceFileService {
                 paths.size()>PAGE_SIZE ? paths.get(PAGE_SIZE-1).getFileName().toString() : null,System.currentTimeMillis(),0,null);
     }
 
-    private static boolean visiblePath(String path) {
-        return WorkspacePathPolicy.visible(path);
-    }
-
     private WorkspaceFileResultDTO create(WorkspaceFileCommandDTO c) throws IOException {
         claim(c);
         if (c.path().isEmpty()) throw new IOException("不能创建工作区根目录");
@@ -138,7 +133,7 @@ public class WorkspaceFileService {
                 c.sha256()==null || !c.sha256().matches("[a-f0-9]{64}")) throw new IOException("上传文件超限或元数据无效");
         Path target=checkedPath(c.workspaceName(),c.path(),true);
         if (Files.exists(target,LinkOption.NOFOLLOW_LINKS)) throw new IOException("同名文件已存在，请改名后上传");
-        Path temporary=Files.createTempFile(target.getParent(),".harness-upload-",".part");
+        Path temporary=Files.createTempFile(AgentStorage.directory(properties.getDataDir(),"workspace-transfers"),"upload-",".part");
         try {
             HttpURLConnection connection=open(c,"/content","GET");
             String hash;
@@ -151,9 +146,16 @@ public class WorkspaceFileService {
             if (!c.sha256().equals(hash)) throw new IOException("文件校验失败");
             authorize(c);
             if (!target.equals(checkedPath(c.workspaceName(),c.path(),true))) throw new IOException("上传期间目录发生变化");
-            // ATOMIC_MOVE may replace an existing target on some providers. A hard link publishes
-            // a complete file with CREATE_NEW semantics, then the temporary name is removed.
-            Files.createLink(target,temporary);
+            if(WindowsWorkspaceHandles.supported()) {
+                Path root=checkedPath(c.workspaceName(),"",false);
+                try(var pin=WindowsWorkspaceHandles.pin(root,target.getParent());var output=WindowsWorkspaceHandles.data(target,true,true)) {
+                    try {output.write(Files.readAllBytes(temporary));}
+                    catch(IOException | RuntimeException failure) {output.delete();throw failure;}
+                }
+            } else {
+                // CREATE_NEW publication of a complete file. Cross-filesystem links fail closed.
+                Files.createLink(target,temporary);
+            }
             return success(c,c.sizeBytes(),hash);
         } finally {Files.deleteIfExists(temporary);}
     }

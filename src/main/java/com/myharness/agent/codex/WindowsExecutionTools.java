@@ -60,7 +60,7 @@ final class WindowsExecutionTools {
     }
     static void configureCommands(ObjectNode params,com.myharness.agent.config.AgentProperties properties) {
         var tool=params.withArray("dynamicTools").addObject().put("type","function").put("name",WindowsCommandTool.NAME)
-                .put("description","Run an administrator-configured program with structured arguments in the project's Windows LPAC. Use for builds and tests. Built-ins: python (isolated Python), cmd (Windows CMD). Additional aliases are listed in program. Processes cannot read external private files or access the network. Tool runtimes are read-only; caches remain within the project. Up to 1800 seconds; all descendants are terminated on completion, cancellation or timeout. Output capped at 128 KiB. No interactive terminal, permission escalation or background servers. Request execution confirmation when required by user instructions.");
+                .put("description","Run an administrator-configured program with structured arguments in the project's Windows LPAC. Use for builds and tests. Built-ins: python (isolated Python), cmd (Windows CMD). Additional aliases are listed in program. Processes cannot read external private files or access the network. Tool runtimes are read-only; caches use a separate per-project execution directory. Up to 1800 seconds; all descendants are terminated on completion, cancellation or timeout. Output capped at 128 KiB. No interactive terminal, permission escalation or background servers. Request execution confirmation when required by user instructions.");
         var schema=tool.putObject("inputSchema").put("type","object").put("additionalProperties",false);schema.putArray("required").add("program").add("args");
         var fields=schema.putObject("properties");var programs=fields.putObject("program").put("type","string").putArray("enum").add("python").add("cmd");
         properties.getWindowsTools().keySet().stream().sorted().filter(name->!name.equals("python")&&!name.equals("cmd")).forEach(programs::add);
@@ -88,12 +88,12 @@ final class WindowsExecutionTools {
         return summary;
     }
 
-    static WindowsIsolatedCommand.Result execute(Path workspace,Path python,JsonNode arguments) {
+    static WindowsIsolatedCommand.Result execute(Path workspace,com.myharness.agent.config.AgentProperties properties,JsonNode arguments) throws java.io.IOException {
         if(!arguments.isObject() || !arguments.path("script").isTextual()) throw new CodexException("Invalid isolated command arguments");
         for(var fields=arguments.fieldNames();fields.hasNext();) {
             String key=fields.next();if(!key.equals("script") && !key.equals("timeout_seconds")) throw new CodexException("Unsupported isolated command field: "+key);
         }
         if(arguments.has("timeout_seconds") && !arguments.path("timeout_seconds").isIntegralNumber()) throw new CodexException("Command timeout must be an integer");
-        return WindowsIsolatedCommand.execute(workspace,arguments.path("script").asText(),arguments.path("timeout_seconds").asInt(60),python);
+        return WindowsIsolatedCommand.execute(workspace,arguments.path("script").asText(),arguments.path("timeout_seconds").asInt(60),properties.getWindowsPython(),com.myharness.agent.workspace.AgentStorage.executionDirectory(properties.getDataDir(),workspace));
     }
 }

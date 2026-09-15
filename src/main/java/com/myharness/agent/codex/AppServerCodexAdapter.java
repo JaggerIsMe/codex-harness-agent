@@ -200,8 +200,10 @@ public class AppServerCodexAdapter implements CodexGateway {
         } catch(IOException failure) {throw new CodexException("Cannot verify Agent state isolation",failure);}
         if(java.nio.file.Files.exists(workspace.resolve(".codex/config.toml"),java.nio.file.LinkOption.NOFOLLOW_LINKS))
             throw new CodexException("Windows 隔离项目不加载 .codex/config.toml；请由管理员将需要的配置迁入受控 Agent 配置");
-        var probe=WindowsIsolatedCommand.execute(workspace,"pass",15,properties.getWindowsPython());
-        if(probe.exitCode()!=0) throw new CodexException("Cannot initialize Windows project execution: "+probe.output());
+        try {
+            var probe=WindowsIsolatedCommand.execute(workspace,"pass",15,properties.getWindowsPython(),com.myharness.agent.workspace.AgentStorage.executionDirectory(properties.getDataDir(),workspace));
+            if(probe.exitCode()!=0) throw new CodexException("Cannot initialize Windows project execution: "+probe.output());
+        } catch(IOException failure) {throw new CodexException("Cannot prepare isolated execution directory",failure);}
     }
 
     private String profileId(Path workspace) {
@@ -278,16 +280,14 @@ public class AppServerCodexAdapter implements CodexGateway {
         ObjectNode settings=params.putObject("collaborationMode").put("mode","default").putObject("settings");
         settings.put("model",model);
         String instructions=expertInstructions(input.getExpertInstructions(),verifiedSkills);
+        // QuestionToolCatalog removes model mode templates which would shadow this per-turn text.
         settings.put("developer_instructions",(instructions==null ? "" : instructions+"\n\n")+ExecutionConfirmation.INSTRUCTIONS);
     }
 
     private static String expertInstructions(String expertInstructions,List<CodexSkillInput> verifiedSkills) {
         if(verifiedSkills.isEmpty()) return expertInstructions;
-        StringBuilder result=new StringBuilder("Harness 专家 Skill 运行规则：Skill 是可选能力，只有适用当前任务时才读取和使用。"
-                +"使用时必须直接读取以下绝对路径，不要替换为用户目录或项目 .agents/skills 下的同名路径，也不要先到其他 Skill 根目录查找。\n");
-        for(var skill:verifiedSkills) result.append("- ").append(skill.name()).append(": ").append(skill.path()).append('\n');
-        if(expertInstructions!=null && !expertInstructions.isBlank()) result.append("\n专家指令：\n").append(expertInstructions);
-        return result.toString();
+        String context=PrivateSkillContext.load(verifiedSkills);
+        return (expertInstructions==null ? "" : expertInstructions+"\n\n")+context;
     }
 
     private List<CodexSkillInput> refreshExpertSkills(Path workspace,CodexTurnInput input) {
@@ -317,7 +317,7 @@ public class AppServerCodexAdapter implements CodexGateway {
 
     void configureSkillRoots(Path workspace,List<CodexSkillInput> skills) {
         try {
-            Path allowed=workspace.toRealPath().resolve(".harness/expert-runtimes");
+            Path allowed=com.myharness.agent.workspace.AgentStorage.directory(com.myharness.agent.workspace.AgentStorage.workspaceRoot(properties.getDataDir(),workspace),"expert-runtimes");
             java.util.Set<Path> paths=new java.util.LinkedHashSet<>();
             java.util.Set<Path> roots=new java.util.LinkedHashSet<>();
             for(var skill:skills) {
@@ -340,11 +340,16 @@ public class AppServerCodexAdapter implements CodexGateway {
         params.put("permissions",profile);
         ObjectNode config=params.withObject("config");
         config.put("default_permissions",profile);
-        config.putObject("permissions").set(profile,ProjectPermissionProfile.policy(objectMapper));
+        config.putObject("permissions").set(profile,ProjectPermissionProfile.policy(objectMapper,properties.getDataDir(),workspace));
         if("Linux".equalsIgnoreCase(System.getProperty("os.name"))) {
             var environment=config.putObject("shell_environment_policy").put("inherit","none");
             environment.putObject("set").put("PATH",System.getProperty("java.home")+"/bin:/usr/local/bin:/usr/bin:/bin")
                     .put("JAVA_HOME",System.getProperty("java.home")).put("LANG","C.UTF-8");
+            try {
+                String temp=com.myharness.agent.workspace.AgentStorage.executionDirectory(properties.getDataDir(),workspace).toString();
+                environment.withObject("set").put("TMPDIR",temp).put("HOME",temp).put("XDG_CACHE_HOME",temp)
+                        .put("NPM_CONFIG_CACHE",temp+"/npm-cache").put("MAVEN_OPTS","-Dmaven.repo.local="+temp+"/maven-repository");
+            } catch(IOException failure) {throw new CodexException("Cannot prepare Linux execution environment",failure);}
         }
     }
 
@@ -910,7 +915,7 @@ public class AppServerCodexAdapter implements CodexGateway {
                 } else if(WorkspacePatchTool.NAME.equals(tool)) {
                     output=WorkspacePatchTool.apply(workspace,WindowsExecutionTools.textArgument(params.path("arguments"),"patch",131072));result.put("success",true);
                 } else {
-                    var execution=WindowsExecutionTools.execute(workspace,properties.getWindowsPython(),params.path("arguments"));
+                    var execution=WindowsExecutionTools.execute(workspace,properties,params.path("arguments"));
                     result.put("success",execution.exitCode()==0);output="Exit code: "+execution.exitCode()+"\n"+execution.output();
                 }
             } catch(Exception failure) {result.put("success",false);output=CodexDiagnostics.redact(failure.getMessage());}

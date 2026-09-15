@@ -25,7 +25,7 @@ class AppServerCodexAdapterTest {
     @Test void stillRejectsUnauthorizedMcpWhenRuntimeIgnoresPluginDisable(@TempDir Path workspace) {
         var mapper=new ObjectMapper();
         for(boolean resume:List.of(false,true)) {
-            var adapter=new AppServerCodexAdapter(new AgentProperties(),mapper) {
+            var adapter=new AppServerCodexAdapter(storageProperties(workspace),mapper) {
                 @Override JsonNode request(String method,JsonNode input) {
                     ObjectNode result=mapper.createObjectNode();
                     if("mcpServerStatus/list".equals(method)) {
@@ -54,7 +54,7 @@ class AppServerCodexAdapterTest {
     @Test void doesNotActivatePluginMcpMissingFromTheInitialInventory(@TempDir Path workspace) {
         for(boolean resume:List.of(false,true)) {
             var mapper=new ObjectMapper();
-            var adapter=new AppServerCodexAdapter(new AgentProperties(),mapper) {
+            var adapter=new AppServerCodexAdapter(storageProperties(workspace),mapper) {
                 private boolean pluginsEnabled=true;
                 @Override JsonNode request(String method,JsonNode input) {
                     ObjectNode result=mapper.createObjectNode();
@@ -85,7 +85,7 @@ class AppServerCodexAdapterTest {
         runtime.setRuntimeMode("MANAGED_PROVIDER");runtime.setRuntimeKey("b".repeat(64));runtime.setModelId("test-model");
         runtime.setBaseUrl("https://models.example/v1");runtime.setApiKey("test-only-key");
         for(boolean resume:List.of(false,true)) for(String field:List.of("model","modelProvider")) for(boolean missing:List.of(false,true)) {
-            var adapter=new AppServerCodexAdapter(new AgentProperties(),mapper) {
+            var adapter=new AppServerCodexAdapter(storageProperties(workspace),mapper) {
                 @Override JsonNode request(String method,JsonNode input) {
                     ObjectNode result=mapper.createObjectNode();
                     result.putObject("thread").put("id","original-thread").put("cwd",workspace.toString())
@@ -107,7 +107,7 @@ class AppServerCodexAdapterTest {
     @Test void resolvesAndPinsLocalCodexTargetWhenResumingAnExistingThread(@TempDir Path workspace) throws Exception {
         Path localCatalog=java.nio.file.Files.writeString(workspace.resolve("fixture-models.json"),"{\"models\":[{\"slug\":\"gpt-local\"}]}");
         var mapper=new ObjectMapper();var methods=new ArrayList<String>();var requests=new ArrayList<JsonNode>();
-        var adapter=new AppServerCodexAdapter(new AgentProperties(),mapper) {
+        var adapter=new AppServerCodexAdapter(storageProperties(workspace),mapper) {
             @Override JsonNode request(String method,JsonNode input) {
                 methods.add(method);requests.add(input.deepCopy());ObjectNode result=mapper.createObjectNode();
                 if("thread/read".equals(method)) {
@@ -158,7 +158,7 @@ class AppServerCodexAdapterTest {
         var options=new CodexThreadOptions("project",workspace,null).withExpertRuntime(List.of(),List.of(stdio,http));
         ObjectNode params=new ObjectMapper().createObjectNode();params.putObject("config").put("existing",true);
 
-        new AppServerCodexAdapter(new AgentProperties(),new ObjectMapper()).configureMcpServers(params,options);
+        new AppServerCodexAdapter(storageProperties(workspace),new ObjectMapper()).configureMcpServers(params,options);
 
         assertEquals("user",params.path("config").path("approvals_reviewer").asText());
         assertFalse(params.path("config").path("features").path("plugins").asBoolean(true));
@@ -175,7 +175,7 @@ class AppServerCodexAdapterTest {
     @Test void explicitlyDisablesInheritedMcpServersForManagedExpert(@TempDir Path workspace) {
         var options=new CodexThreadOptions("project",workspace,null).withExpertRuntime(List.of(),List.of());
         ObjectNode params=new ObjectMapper().createObjectNode();
-        var adapter=new AppServerCodexAdapter(new AgentProperties(),new ObjectMapper()) {
+        var adapter=new AppServerCodexAdapter(storageProperties(workspace),new ObjectMapper()) {
             @Override JsonNode request(String method,JsonNode input) {
                 assertEquals("mcpServerStatus/list",method);
                 ObjectNode result=new ObjectMapper().createObjectNode();result.putNull("nextCursor");
@@ -197,7 +197,7 @@ class AppServerCodexAdapterTest {
     @Test void acceptsNullRuntimeStatusForDisabledInheritedMcp(@TempDir Path workspace) {
         var mapper=new ObjectMapper();
         int[] statusRequests={0};
-        var adapter=new AppServerCodexAdapter(new AgentProperties(),mapper) {
+        var adapter=new AppServerCodexAdapter(storageProperties(workspace),mapper) {
             @Override JsonNode request(String method,JsonNode input) {
                 ObjectNode result=mapper.createObjectNode();
                 if("mcpServerStatus/list".equals(method)) {
@@ -223,7 +223,7 @@ class AppServerCodexAdapterTest {
     @Test void doesNotSerializeCodexAppsPseudoTransportAsAStandardMcpOverride(@TempDir Path workspace) {
         var options=new CodexThreadOptions("project",workspace,null).withExpertRuntime(List.of(),List.of());
         ObjectNode params=new ObjectMapper().createObjectNode();
-        var adapter=new AppServerCodexAdapter(new AgentProperties(),new ObjectMapper()) {
+        var adapter=new AppServerCodexAdapter(storageProperties(workspace),new ObjectMapper()) {
             @Override JsonNode request(String method,JsonNode input) {
                 assertEquals("mcpServerStatus/list",method);
                 ObjectNode result=new ObjectMapper().createObjectNode();result.putNull("nextCursor");
@@ -240,7 +240,7 @@ class AppServerCodexAdapterTest {
                 "codex_apps is a special Apps transport and is invalid inside a standard mcp_servers session override");
     }
     @Test void refreshesDiscoveryAndLeavesBoundSkillAvailableWithoutChangingUserInput(@TempDir Path workspace) throws Exception {
-        Path skill=workspace.resolve(".harness/expert-runtimes/1/runtime/skills/harness-expert-1-1/SKILL.md");
+        Path skill=privateRoot(workspace).resolve("expert-runtimes/1/runtime/skills/harness-expert-1-1/SKILL.md");
         Files.createDirectories(skill.getParent());
         Files.writeString(skill,"---\nname: hello-skill\ndescription: Use for greetings.\n---\nWhen greeted, reply HELLO_FROM_HARNESS_SKILL.");
         var adapter=new StoredThreadAdapter(workspace);
@@ -252,9 +252,10 @@ class AppServerCodexAdapterTest {
         var request=adapter.params.getLast();
         String instructions=request.path("collaborationMode").path("settings").path("developer_instructions").asText();
         assertTrue(instructions.contains("Use the bound Skills"));
-        assertTrue(instructions.contains(skill.toRealPath().toString()));
+        assertTrue(instructions.contains("HELLO_FROM_HARNESS_SKILL"));
+        assertFalse(instructions.contains(skill.toRealPath().toString()));
         assertTrue(instructions.contains("可选能力"));
-        assertTrue(instructions.contains("不要替换为用户目录或项目 .agents/skills 下的同名路径"));
+        assertTrue(instructions.contains("私有技能路径不能通过文件工具或命令访问"));
         assertEquals("Hello",request.path("input").get(0).path("text").asText());
         assertEquals(1,request.path("input").size());
         assertFalse(request.toString().contains("$review"));
@@ -266,7 +267,7 @@ class AppServerCodexAdapterTest {
         var adapter=new StoredThreadAdapter(workspace);
         adapter.resumeThread("original-thread",new CodexThreadOptions("project",workspace,"test-model"));
         var listener=org.mockito.Mockito.mock(CodexEventListener.class);
-        var skill=new CodexSkillInput("review",workspace.resolve(".harness/expert-runtimes/1/runtime/skills/harness-expert-1-2/SKILL.md").toString());
+        var skill=new CodexSkillInput("review",privateRoot(workspace).resolve("expert-runtimes/1/runtime/skills/harness-expert-1-2/SKILL.md").toString());
         Files.createDirectories(Path.of(skill.path()).getParent());
         Files.writeString(Path.of(skill.path()),"# Review\nReview project code.");
         adapter.configureSkillRoots(workspace,List.of(skill));
@@ -291,7 +292,7 @@ class AppServerCodexAdapterTest {
         assertEquals(List.of("thread/read","thread/resume","skills/list"),adapter.methods);
     }
     @Test void refusesDisabledSkillBeforeStartingModelTurn(@TempDir Path workspace) throws Exception {
-        Path skill=workspace.resolve(".harness/expert-runtimes/1/runtime/skills/expert/SKILL.md");
+        Path skill=privateRoot(workspace).resolve("expert-runtimes/1/runtime/skills/expert/SKILL.md");
         Files.createDirectories(skill.getParent());Files.writeString(skill,"disabled");
         var adapter=new StoredThreadAdapter(workspace);adapter.disabledSkill=true;
         adapter.configureSkillRoots(workspace,List.of(new CodexSkillInput("review",skill.toString())));
@@ -301,7 +302,7 @@ class AppServerCodexAdapterTest {
         assertFalse(adapter.methods.contains("turn/start"));
     }
     @Test void refusesSkillAbsentFromNativeDiscoveryBeforeStartingModelTurn(@TempDir Path workspace) throws Exception {
-        Path skill=workspace.resolve(".harness/expert-runtimes/1/runtime/skills/expert/SKILL.md");
+        Path skill=privateRoot(workspace).resolve("expert-runtimes/1/runtime/skills/expert/SKILL.md");
         Files.createDirectories(skill.getParent());Files.writeString(skill,"not discovered");
         var adapter=new StoredThreadAdapter(workspace);adapter.missingSkill=true;
         adapter.configureSkillRoots(workspace,List.of(new CodexSkillInput("review",skill.toString())));
@@ -357,8 +358,8 @@ class AppServerCodexAdapterTest {
         assertEquals("deny",policy.path("filesystem").path(":tmpdir").asText());
         assertEquals("deny",policy.path("filesystem").path(":slash_tmp").asText());
         assertEquals("write",policy.path("filesystem").path(":workspace_roots").path(".").asText());
-        assertEquals("read",policy.path("filesystem").path(":workspace_roots").path(".git").asText());
-        assertEquals("read",policy.path("filesystem").path(":workspace_roots").path(".codex").asText());
+        assertEquals("write",policy.path("filesystem").path(":workspace_roots").path(".git").asText());
+        assertEquals("write",policy.path("filesystem").path(":workspace_roots").path(".codex").asText());
         assertFalse(policy.path("network").path("enabled").asBoolean());
         JsonNode turn = adapter.params.get(2);
         assertEquals("original-thread", turn.path("threadId").asText());
@@ -500,6 +501,13 @@ class AppServerCodexAdapterTest {
         return request;
     }
 
+    private static AgentProperties storageProperties(Path workspace) {
+        var properties=new AgentProperties();properties.setDataDir(workspace.resolveSibling(workspace.getFileName()+"-data"));return properties;
+    }
+    private static Path privateRoot(Path workspace) throws Exception {
+        return com.myharness.agent.workspace.AgentStorage.workspaceRoot(storageProperties(workspace).getDataDir(),workspace);
+    }
+
     private static final class StoredThreadAdapter extends AppServerCodexAdapter {
         private final ObjectMapper mapper = new ObjectMapper();
         private final Path workspace;
@@ -514,7 +522,7 @@ class AppServerCodexAdapterTest {
         private CodexException readFailure;
 
         StoredThreadAdapter(Path workspace) {
-            super(new AgentProperties(), new ObjectMapper());
+            super(storageProperties(workspace), new ObjectMapper());
             this.workspace = workspace;
         }
 
@@ -537,10 +545,10 @@ class AppServerCodexAdapterTest {
                 var group=result.putArray("data").addObject().put("cwd",workspace.toString());
                 var found=group.putArray("skills");
                 if(missingSkill) return result;
-                try(var files=Files.walk(workspace)) {
+                try(var files=Files.walk(privateRoot(workspace))) {
                     for(var file:files.filter(p->p.getFileName().toString().equals("SKILL.md")).toList())
                         found.addObject().put("path",file.toRealPath().toString()).put("name","review").put("enabled",!disabledSkill);
-                } catch(java.io.IOException failure) {throw new AssertionError(failure);}
+                } catch(Exception failure) {throw new AssertionError(failure);}
             } else {
                 throw new AssertionError("Unexpected RPC: " + method);
             }
@@ -558,7 +566,7 @@ class AppServerCodexAdapterTest {
                 + "echo Error loading config: unknown field test_field 1>&2\r\n"
                 + "echo api_key=example-secret Authorization: Bearer example-token 1>&2\r\n"
                 + "exit /b 1\r\n").getBytes(StandardCharsets.UTF_8));
-        AgentProperties properties = new AgentProperties();
+        AgentProperties properties = storageProperties(directory);
         properties.setCodexCommand(command.toString());
         properties.setCodexRequestTimeoutSeconds(5);
         AppServerCodexAdapter adapter = new AppServerCodexAdapter(properties, new ObjectMapper());

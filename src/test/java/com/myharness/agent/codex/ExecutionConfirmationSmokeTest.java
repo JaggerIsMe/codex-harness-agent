@@ -23,17 +23,18 @@ import static org.junit.jupiter.api.Assertions.*;
 @EnabledIfSystemProperty(named="codex.confirmation.smoke",matches="true")
 class ExecutionConfirmationSmokeTest {
     @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(booleans={false,true})
-    void confirmsOnNewAndResumedThreadsWithoutNativeApproval(boolean choice,@TempDir Path workspace,@TempDir Path data) throws Exception {
+    @org.junit.jupiter.params.provider.CsvSource({"false,false,false","true,false,false","false,true,false","true,true,false","false,true,true","true,true,true"})
+    void confirmsOnNewAndResumedThreadsWithoutNativeApproval(boolean choice,boolean privateSkill,boolean orchestration,@TempDir Path workspace,@TempDir Path data) throws Exception {
         var json=new ObjectMapper();var nextConfirmation=new AtomicBoolean(true);
         var cancelMode=new AtomicBoolean(false);
         var continuedInput=new AtomicReference<String>();
+        var firstRequest=new AtomicReference<String>();
         var advertisedTools=new java.util.concurrent.LinkedBlockingQueue<String>();
         var provider=com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);
         provider.createContext("/responses",exchange -> {
             String input=new String(exchange.getRequestBody().readAllBytes(),StandardCharsets.UTF_8);
             boolean confirm=nextConfirmation.getAndSet(false);
-            if(confirm) advertisedTools.add(json.readTree(input).path("tools").toString());
+            if(confirm) { firstRequest.set(input); advertisedTools.add(json.readTree(input).path("tools").toString()); }
             ObjectNode item=json.createObjectNode().put("id",confirm?"fc-confirm":"msg-confirm").put("status","completed");
             if(confirm) {
                 item.put("type","function_call").put("name","request_user_input").put("call_id","call-confirm");
@@ -65,7 +66,18 @@ class ExecutionConfirmationSmokeTest {
             runtime.setProviderName("Local confirmation fixture");runtime.setBaseUrl("http://127.0.0.1:"+provider.getAddress().getPort());runtime.setApiKey("synthetic-local-test-key");
             var properties=new AgentProperties();properties.setDataDir(data);properties.setCodexRequestTimeoutSeconds(20);
             if(System.getProperty("windows.isolation.python")!=null)properties.setWindowsPython(Path.of(System.getProperty("windows.isolation.python")));
-            var options=new CodexThreadOptions("confirmation-probe",workspace,runtime).withExpertRuntime(List.of(),List.of());
+            List<CodexSkillInput> skills=List.of();
+            if(privateSkill) {
+                Path privateRoot=com.myharness.agent.workspace.AgentStorage.workspaceRoot(data,workspace);
+                Path packageRoot=com.myharness.agent.workspace.AgentStorage.directory(privateRoot,
+                        "expert-runtimes/confirmation-probe/"+"d".repeat(64)+"/skills/harness-confirmation-probe");
+                Path skill=packageRoot.resolve("SKILL.md");
+                java.nio.file.Files.writeString(skill,"---\nname: harness-confirmation-probe\ndescription: Private confirmation regression fixture\n---\nFollow Harness execution confirmation rules.\n");
+                java.nio.file.Files.writeString(packageRoot.resolve("reference.md"),"PRIVATE_APPROVAL_RESOURCE_SENTINEL");
+                skills=List.of(new CodexSkillInput("harness-confirmation-probe",skill.toString()));
+                assertFalse(skill.startsWith(workspace));
+            }
+            var options=new CodexThreadOptions("confirmation-probe",workspace,runtime).withExpertRuntime(skills,List.of()).withOrchestration(orchestration);
             String thread=null;
             for(var decision:List.of(ApprovalDecision.ACCEPT,ApprovalDecision.DECLINE,ApprovalDecision.CANCEL)) {
                 nextConfirmation.set(true);continuedInput.set(null);
@@ -75,6 +87,12 @@ class ExecutionConfirmationSmokeTest {
                         Path path=super.startupModelCatalog();
                         try {
                             var catalog=json.readTree(path.toFile());
+                            // Native models can supply a default-mode template which takes precedence
+                            // over collaborationMode.settings.developer_instructions (Conversation 37).
+                            if(privateSkill) ((ObjectNode)catalog.path("models").get(0))
+                                    .putObject("model_messages").putObject("collaboration_modes")
+                                    .put("default","NATIVE_DEFAULT_MODE_SENTINEL: Never use request_user_input for permission requests.")
+                                    .putNull("plan");
                             ((ObjectNode)catalog.path("models").get(0)).putArray("experimental_supported_tools")
                                     .add("send_user_message_async").add("clock");
                             if(choice)((ObjectNode)catalog.path("models").get(0)).put("tool_mode","code_mode_only");
@@ -86,7 +104,8 @@ class ExecutionConfirmationSmokeTest {
                     if(thread==null) thread=adapter.startThread(options);else adapter.resumeThread(thread,options);
                     var requested=new CompletableFuture<CodexApproval>();var finished=new CompletableFuture<String>();
                     var input=new CodexTurnInput("请执行测试操作，执行前必须让我确认。");
-                    if(choice)input=input.withExpert("Follow Harness confirmation rules.",List.of());
+                    if(choice || privateSkill)input=input.withExpert("EXPERT_PROMPT_"+decision+": Follow Harness confirmation rules.",skills);
+                    input.withOrchestration(orchestration);
                     adapter.startTurn(thread,input,new CodexEventListener() {
                         public void onEvent(CodexEvent event) { }
                         public void onApproval(CodexApproval approval) { requested.complete(approval); }
@@ -96,6 +115,14 @@ class ExecutionConfirmationSmokeTest {
                     assertNotNull(tools,"The real runtime must send a tool declaration to the local model");
                     assertFalse(tools.contains("request_user_input_async"),"Harness must not advertise a question tool that bypasses its waiting/answer protocol");
                     assertTrue(tools.contains("request_user_input"),"Blocking questions must remain available");
+                    assertEquals(orchestration,tools.contains(OrchestrationOutcomeTool.NAME));
+                    if(privateSkill) {
+                        String developer=developerText(json,firstRequest.get());
+                        assertTrue(developer.contains("PRIVATE_APPROVAL_RESOURCE_SENTINEL"),"The private text resource must reach real developer messages");
+                        assertTrue(developer.contains("EXPERT_PROMPT_"+decision),"The current Expert prompt must reach the model after start/resume");
+                        assertTrue(developer.contains(ExecutionConfirmation.QUESTION_ID),"Private Skill loading must preserve the confirmation protocol");
+                        assertFalse(developer.contains("NATIVE_DEFAULT_MODE_SENTINEL"),"A model mode template must not shadow the Expert or contradict approvals");
+                    }
                     var approval=requested.get(30,TimeUnit.SECONDS);
                     assertEquals(choice?ApprovalType.MCP_TOOL_CALL:ApprovalType.EXECUTION_CONFIRMATION,approval.getType());
                     assertFalse(finished.isDone());assertNull(continuedInput.get(),"Model must wait for the decision");
@@ -109,6 +136,21 @@ class ExecutionConfirmationSmokeTest {
                     if(choice && decision==ApprovalDecision.ACCEPT)assertTrue(continuedInput.get().contains("只给绘图提示词"));
                     else if(!choice&&decision!=ApprovalDecision.CANCEL)
                         assertTrue(continuedInput.get().contains(decision==ApprovalDecision.ACCEPT?"批准本次":"拒绝操作"));
+                    if(privateSkill && decision==ApprovalDecision.ACCEPT) {
+                        // The same loaded process must use fresh instructions, without resume/restart.
+                        var nextFinished=new CompletableFuture<String>();
+                        adapter.startTurn(thread,new CodexTurnInput("继续下一轮")
+                                .withExpert("EXPERT_PROMPT_FOLLOWUP",skills).withOrchestration(orchestration),new CodexEventListener() {
+                            public void onEvent(CodexEvent event) { }
+                            public void onApproval(CodexApproval approval) {nextFinished.completeExceptionally(new AssertionError("Unexpected approval"));}
+                            public void onCompleted(String id,String status,String reason) {nextFinished.complete(status);}
+                        });
+                        assertEquals("completed",nextFinished.get(30,TimeUnit.SECONDS));
+                        String developer=developerText(json,continuedInput.get());
+                        assertTrue(developer.contains("EXPERT_PROMPT_FOLLOWUP"));
+                        assertTrue(developer.contains("PRIVATE_APPROVAL_RESOURCE_SENTINEL"));
+                        assertFalse(developer.contains("NATIVE_DEFAULT_MODE_SENTINEL"));
+                    }
                 }
             }
         } finally {
@@ -116,5 +158,12 @@ class ExecutionConfirmationSmokeTest {
             if(System.getProperty("os.name").startsWith("Windows")&&System.getProperty("windows.isolation.python")!=null)
                 WindowsIsolatedCommand.cleanupProfile(workspace,Path.of(System.getProperty("windows.isolation.python")));
         }
+    }
+
+    private static String developerText(ObjectMapper json,String request) throws Exception {
+        var result=new StringBuilder();
+        for(var item:json.readTree(request).path("input")) if("developer".equals(item.path("role").asText()))
+            for(var content:item.path("content"))result.append(content.path("text").asText()).append('\n');
+        return result.toString();
     }
 }

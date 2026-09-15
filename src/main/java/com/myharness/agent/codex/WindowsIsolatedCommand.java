@@ -26,13 +26,13 @@ final class WindowsIsolatedCommand {
     private WindowsIsolatedCommand() { }
     record Result(int exitCode,String output) { }
 
-    static Result execute(Path directory,String script,int timeoutSeconds,Path python) {
-        return execute(directory,script,timeoutSeconds,python,java.util.List.of(),java.util.Map.of(),120);
+    static Result execute(Path directory,String script,int timeoutSeconds,Path python,Path temporaryDirectory) {
+        return execute(directory,script,timeoutSeconds,python,temporaryDirectory,java.util.List.of(),java.util.Map.of(),120);
     }
-    static Result executeTool(Path directory,String script,int timeoutSeconds,Path python,java.util.List<Path> runtimes,java.util.Map<String,String> environment) {
-        return execute(directory,script,timeoutSeconds,python,runtimes,environment,1800);
+    static Result executeTool(Path directory,String script,int timeoutSeconds,Path python,Path temporaryDirectory,java.util.List<Path> runtimes,java.util.Map<String,String> environment) {
+        return execute(directory,script,timeoutSeconds,python,temporaryDirectory,runtimes,environment,1800);
     }
-    private static Result execute(Path directory,String script,int timeoutSeconds,Path python,java.util.List<Path> runtimes,java.util.Map<String,String> extraEnvironment,int maximumTimeout) {
+    private static Result execute(Path directory,String script,int timeoutSeconds,Path python,Path temporaryDirectory,java.util.List<Path> runtimes,java.util.Map<String,String> extraEnvironment,int maximumTimeout) {
         if(!Platform.isWindows() || !Platform.is64Bit()) throw new CodexException("Windows isolation requires 64-bit Windows");
         if(script==null || script.isBlank() || script.length()>12000) throw new CodexException("Command must contain 1–12000 characters");
         if(timeoutSeconds<1 || timeoutSeconds>maximumTimeout) throw new CodexException("Command timeout must be 1–"+maximumTimeout+" seconds");
@@ -46,22 +46,14 @@ final class WindowsIsolatedCommand {
             try(var workspacePin=com.myharness.agent.workspace.WindowsWorkspaceHandles.pin(workspace,workspace)) {
                 var packageSid=new WinNT.PSID(sid.getValue());
                 grant(workspace,packageSid,false,MODIFY);
-                for(String name:new String[]{".git",".codex",".harness",".agent",".agents"}) {
-                    Path reserved=workspace.resolve(name);
-                    if(!Files.exists(reserved,java.nio.file.LinkOption.NOFOLLOW_LINKS)) Files.createDirectory(reserved);
+                for(String name:new String[]{".git",".codex",".agent",".agents"}) {
+                    Path existing=workspace.resolve(name);
+                    if(Files.exists(existing,java.nio.file.LinkOption.NOFOLLOW_LINKS))releaseLegacyReadOnly(workspace,existing,packageSid);
                 }
-                for(String protectedName:new String[]{".git",".codex",".harness",".agent",".agents",".harness-workspace.json"}) {
-                    Path protectedPath=workspace.resolve(protectedName);
-                    if(Files.exists(protectedPath)) {
-                        if(!protectedPath.toRealPath().startsWith(workspace)) throw new CodexException("Protected directory leaves Workspace");
-                        try(var metadataPin=com.myharness.agent.workspace.WindowsWorkspaceHandles.pin(workspace,protectedPath)) {
-                            grant(protectedPath,packageSid,true,MODIFY);
-                        }
-                    }
-                }
-                Path temp=workspace.resolve(".harness/exec-tmp");Files.createDirectories(temp);
-                if(!temp.toRealPath().startsWith(workspace)) throw new CodexException("Temporary directory leaves Workspace");
-                try(var tempPin=com.myharness.agent.workspace.WindowsWorkspaceHandles.pin(workspace,temp)) {grant(temp,packageSid,false,MODIFY);}
+                Path temp=temporaryDirectory.toRealPath();
+                if(temp.startsWith(workspace) || workspace.startsWith(temp) || !temp.equals(temporaryDirectory.toAbsolutePath().normalize()))
+                    throw new CodexException("Execution temporary directory must be separate from Workspace");
+                try(var tempPin=com.myharness.agent.workspace.WindowsWorkspaceHandles.pin(temp,temp)) {grant(temp,packageSid,false,MODIFY);}
                 String windows=System.getenv("SystemRoot");
                 if(python==null) throw new CodexException("Windows isolation requires a dedicated Python runtime");
                 Path runtime=python.toRealPath();
@@ -76,7 +68,13 @@ final class WindowsIsolatedCommand {
                     grant(home,packageSid,false,0x1200a9);
                 }
                 String shell=runtime.toString();
-                String payload=Base64.getEncoder().encodeToString(script.getBytes(StandardCharsets.UTF_8));
+                // Windows rewrites AppContainer profile environment values during process creation.
+                // Restore our per-project directory before evaluating any generated code.
+                String encodedTemp=Base64.getEncoder().encodeToString(temp.toString().getBytes(StandardCharsets.UTF_8));
+                String bootstrap="import os,base64\n_harness_temp=base64.b64decode('"+encodedTemp+"').decode('utf-8')\n"
+                        +"os.environ.update({k:_harness_temp for k in ('TEMP','TMP','USERPROFILE','APPDATA','LOCALAPPDATA')})\n";
+                String payload=Base64.getEncoder().encodeToString((bootstrap+"exec(compile(base64.b64decode('"
+                        +Base64.getEncoder().encodeToString(script.getBytes(StandardCharsets.UTF_8))+"'),'<harness>','exec'))").getBytes(StandardCharsets.UTF_8));
                 String command='"'+shell+'"'+" -I -S -X utf8 -c \"import base64;exec(compile(base64.b64decode('"+payload+"'),'<harness>','exec'))\"";
                 if(command.length()>32000) throw new CodexException("Encoded command exceeds the Windows command-line limit");
                 var environment=new TreeMap<String,String>(String.CASE_INSENSITIVE_ORDER);
@@ -189,6 +187,27 @@ final class WindowsIsolatedCommand {
             if(value.getInt(0)!=1) throw new CodexException("Process does not have an AppContainer token");
         } finally {close(token.getValue());}
     }
+    private static void releaseLegacyReadOnly(Path workspace,Path path,WinNT.PSID sid) throws java.io.IOException {
+        if(!path.toRealPath().equals(path) || !path.startsWith(workspace))throw new CodexException("Legacy metadata path cannot be a link");
+        try(var pin=com.myharness.agent.workspace.WindowsWorkspaceHandles.pin(workspace,path)) {
+            var acl=new PointerByReference();var descriptor=new PointerByReference();
+            int result=Advapi32.INSTANCE.GetNamedSecurityInfo(path.toString(),1,4,null,null,acl,null,descriptor);
+            if(result!=0 || acl.getValue()==null)throw new CodexException("Cannot inspect legacy metadata ACL");
+            boolean managed=false;
+            try {
+                var old=new WinNT.ACL(acl.getValue());old.read();
+                for(int i=0;i<Short.toUnsignedInt(old.AceCount);i++) {
+                    var entry=new PointerByReference();check(Advapi32.INSTANCE.GetAce(old,i,entry),"inspect legacy ACL");
+                    Pointer ace=entry.getValue();
+                    if(ace.getByte(0)==0 && (ace.getByte(1)&16)==0 && ace.getInt(4)==0x1200a9
+                            && Advapi32.INSTANCE.EqualSid(new WinNT.PSID(ace.share(8)),sid))managed=true;
+                }
+            } finally {Kernel32.INSTANCE.LocalFree(descriptor.getValue());}
+            // Do not reset user ACLs. Replace only our old read-only package grant.
+            if(managed)grant(path,sid,false,MODIFY);
+        }
+    }
+
     private static synchronized void grant(Path path,WinNT.PSID sid,boolean denyWrite,int allowedMask) {
         var oldAcl=new PointerByReference();var descriptor=new PointerByReference();
         int result=Advapi32.INSTANCE.GetNamedSecurityInfo(path.toString(),1,4,null,null,oldAcl,null,descriptor);
@@ -255,9 +274,12 @@ final class WindowsIsolatedCommand {
         var sid=new PointerByReference();
         if(Userenv.API.DeriveAppContainerSidFromAppContainerName(name,sid)!=0) throw new CodexException("Cannot derive isolation profile for cleanup");
         try {
-            if(python!=null && Files.exists(python)) grant(python.toRealPath().getParent(),new WinNT.PSID(sid.getValue()),false,0);
-            int result=Userenv.API.DeleteAppContainerProfile(name);
-            if(result!=0 && result!=0x80070002) throw new CodexException("Cannot delete isolation self-test profile");
+            try {
+                if(python!=null && Files.exists(python)) grant(python.toRealPath().getParent(),new WinNT.PSID(sid.getValue()),false,0);
+            } finally {
+                int result=Userenv.API.DeleteAppContainerProfile(name);
+                if(result!=0 && result!=0x80070002) throw new CodexException("Cannot delete isolation self-test profile");
+            }
         } finally {Security.API.FreeSid(sid.getValue());}
     }
     private static void freeArray(PointerByReference array,IntByReference count) {if(array.getValue()!=null) {for(int i=0;i<count.getValue();i++) Kernel32.INSTANCE.LocalFree(array.getValue().getPointer((long)i*Native.POINTER_SIZE));Kernel32.INSTANCE.LocalFree(array.getValue());}}

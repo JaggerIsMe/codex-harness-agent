@@ -27,7 +27,7 @@ class ExpertSkillTransportLifecycleTest {
         Path workspace = Files.createDirectory(root.resolve("project"));
         Path data = Files.createDirectory(root.resolve("data"));
         Path catalog=Files.writeString(root.resolve("local-models.json"),"{\"models\":[{\"slug\":\"local-probe\"}]}");
-        Path skill = Files.createDirectories(workspace.resolve(".harness/expert-runtimes/1/probe")).resolve("SKILL.md");
+        Path skill = Files.createDirectories(com.myharness.agent.workspace.AgentStorage.workspaceRoot(data,workspace).resolve("expert-runtimes/1/probe")).resolve("SKILL.md");
         Files.writeString(skill, "---\nname: hello-skill\ndescription: Test fixture.\n---\nReply hello.\n");
         var skills = List.of(new CodexSkillInput("hello-skill", skill.toRealPath().toString()));
         String skillRoot = skill.getParent().getParent().toRealPath().toString();
@@ -72,7 +72,8 @@ class ExpertSkillTransportLifecycleTest {
                         result.putObject("activePermissionProfile").put("id", params.path("permissions").asText());
                     }
                     case "turn/start" -> {
-                        assertTrue(params.path("collaborationMode").path("settings").path("developer_instructions").asText().contains(skills.getFirst().path()));
+                        assertTrue(params.path("collaborationMode").path("settings").path("developer_instructions").asText().contains("Reply hello."));
+                        assertFalse(params.path("collaborationMode").path("settings").path("developer_instructions").asText().contains(skills.getFirst().path()));
                         result.putObject("turn").put("id", "turn-probe");
                     }
                     default -> throw new AssertionError("Unexpected RPC: " + method);

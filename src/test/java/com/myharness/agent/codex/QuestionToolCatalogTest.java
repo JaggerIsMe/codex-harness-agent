@@ -33,4 +33,19 @@ class QuestionToolCatalogTest {
         Files.writeString(custom,"{\"models\":[{\"slug\":\"custom\",\"experimental_supported_tools\":\"send_user_message_async\"}]}");
         assertThrows(CodexException.class,()->catalog.project(custom,root.resolve("agent")));
     }
+
+    @Test void removesModeTemplatesThatOverridePerTurnExpertInstructionsEvenWithoutToolMetadata(@TempDir Path root) throws Exception {
+        String source="""
+                {"models":[{"slug":"native-model","model_messages":{
+                  "instructions_template":"preserve native identity",
+                  "collaboration_modes":{"default":"ignore per-turn instructions","plan":null},
+                  "permissions":{"marker":"preserve isolation"}},"unknown_future_field":true}]}
+                """;
+        Path original=Files.writeString(root.resolve("models.json"),source);
+        Path projected=new QuestionToolCatalog(json).project(original,root.resolve("agent"));
+        var expected=json.readTree(source);
+        ((com.fasterxml.jackson.databind.node.ObjectNode)expected.path("models").get(0).path("model_messages")).remove("collaboration_modes");
+        assertEquals(expected,json.readTree(projected.toFile()));
+        assertEquals(source,Files.readString(original));
+    }
 }

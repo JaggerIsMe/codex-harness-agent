@@ -34,7 +34,7 @@ import java.util.regex.Pattern;
 public class WorkspaceRegistry {
     private static final int MANIFEST_VERSION = 1;
     private static final String MANIFEST_FILE_NAME = "workspaces.json";
-    private static final String MARKER_FILE_NAME = ".harness-workspace.json";
+    private static final String MARKER_DIRECTORY = "workspace-creation";
     private static final Pattern SAFE_WORKSPACE_NAME = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]{0,63}");
     private static final Pattern WINDOWS_RESERVED_NAME = Pattern.compile(
             "(?i)(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\\..*)?");
@@ -58,6 +58,8 @@ public class WorkspaceRegistry {
         this.roots = loadRoots(properties.getWorkspaceRoots());
         this.rootViews = rootViews(roots);
         this.configuredWorkspaces = loadConfiguredWorkspaces(properties.getWorkspaces());
+        try {AgentStorage.protectDataDirectory(dataDirectory);}
+        catch(IOException failure) {throw new IllegalStateException("Cannot secure Agent data directory",failure);}
         this.dynamicRecords = loadManifest();
         if(maxWorkspaces>0 && configuredWorkspaces.size()+dynamicRecords.size()>maxWorkspaces)
             throw new IllegalStateException("Workspace count exceeds this Agent's configured isolation capacity");
@@ -131,6 +133,11 @@ public class WorkspaceRegistry {
         } finally {
             mutationLock.unlock();
         }
+    }
+
+    public Path privateDirectory(String workspaceName,String relative) {
+        try {return AgentStorage.directory(AgentStorage.workspaceRoot(dataDirectory,resolve(workspaceName,"")),relative);}
+        catch(IOException failure) {throw new WorkspaceAccessException("Cannot prepare private Workspace data",failure);}
     }
 
     public Path resolve(String workspaceName, String relativePath) {
@@ -316,16 +323,25 @@ public class WorkspaceRegistry {
         marker.put("requestId", record.getRequestId());
         marker.put("workspaceName", record.getWorkspaceName());
         marker.put("parentName", record.getParentName());
-        try (OutputStream output = Files.newOutputStream(directory.resolve(MARKER_FILE_NAME))) {
-            objectMapper.writeValue(output, marker);
-        }
+        marker.put("directoryIdentity",WorkspacePathPolicy.identity(directory));
+        Path destination=creationMarker(record.getRequestId());
+        Path temporary=Files.createTempFile(destination.getParent(),"marker-",".tmp");
+        try {
+            objectMapper.writeValue(temporary.toFile(),marker);
+            moveReplacing(temporary,destination);
+        } finally {Files.deleteIfExists(temporary);}
     }
 
     private boolean markerMatches(Path directory, String requestId) throws IOException {
-        Path marker = directory.resolve(MARKER_FILE_NAME);
+        Path marker = creationMarker(requestId);
         if (!Files.isRegularFile(marker, LinkOption.NOFOLLOW_LINKS)) return false;
         JsonNode value = objectMapper.readTree(marker.toFile());
-        return value.has("requestId") && requestId.equals(value.get("requestId").asText());
+        return value.has("requestId") && requestId.equals(value.get("requestId").asText())
+                && value.path("directoryIdentity").asText().equals(WorkspacePathPolicy.identity(directory));
+    }
+
+    private Path creationMarker(String requestId) throws IOException {
+        return AgentStorage.directory(dataDirectory,MARKER_DIRECTORY).resolve(AgentStorage.key(requestId)+".json");
     }
 
     private void moveDirectory(Path source, Path target) throws IOException {
@@ -435,7 +451,8 @@ public class WorkspaceRegistry {
         if (configuredPath == null) throw new IllegalStateException("Agent data directory must be configured");
         try {
             Files.createDirectories(configuredPath.toAbsolutePath().normalize());
-            return configuredPath.toRealPath();
+            Path directory=configuredPath.toRealPath();
+            return directory;
         } catch (IOException exception) {
             throw new IllegalStateException("Unable to prepare agent data directory: " + configuredPath, exception);
         }

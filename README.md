@@ -2,6 +2,8 @@
 
 [项目文档总目录](../../docs/README.md) · [设备与执行环境](../../docs/modules/devices-agent.md) · [当前架构](../../docs/architecture/overview.md)
 
+[交付架构与设计](../../docs/agent-distribution-v1.md) · [双平台开发手册](../../docs/guides/agent-development.md)
+
 Harness Agent 通过主动 WSS 连接接受 Harness Server 指令，并在项目专用执行环境中驱动 `codex app-server`。
 
 首版正式交付范围已确定为 **Windows 桌面安装包 + Linux 独立服务器安装包**，共用 Java Agent 核心；Linux 一台独立服务器运行一个 Agent、注册一个 Device，由 systemd 管理，允许在已授权父目录下创建多个 Project，每个项目独占 Workspace，与 Windows 项目组织一致。两类安装包尚未实现，Linux 多项目实机隔离验收尚未完成；范围与实施要求见 [首版交付方案](../../docs/agent-distribution-v1.md)。
@@ -10,16 +12,24 @@ Harness Agent 通过主动 WSS 连接接受 Harness Server 指令，并在项目
 
 图片查看、本机 Codex 生图、补丁编辑和结构化命令通过受控工具恢复，原生工具开关仍关闭。新增工具需要升级 Agent 后新建会话；第三方生图、Maven 和多 Agent 的当前限制见 [受控工具恢复与验证](../../docs/controlled-windows-tools.md)。
 
+## 工程组织与开发状态
+
+一个仓库共用 Java Agent 核心，现有 `pom.xml`、`src/` 保持原路径。建议在本模块内新增 `desktop/`（Vue/Tauri 桌面工程）和 `packaging/common`、`packaging/windows`、`packaging/linux`（发布组装与安装支持）；这些目录目前尚未创建。Linux 原生打包不依赖桌面构建，Windows 包组合核心、桌面与平台运行时；不复制第二份 Java Agent。
+
+已有注册、连接、多项目登记、执行协调和部分清理实现；完整本地管理协议、Agent 级单实例锁、统一停止协调、外部发布配置、安装器与 systemd 集成仍待开发。具体接入点、现有命令及计划脚本分列在开发手册中，不能把方案中的路径或脚本当作现有命令。
+
 ## 权限与执行
 
 - Java 21、Maven 3.6.3+；Codex 版本与平台验证范围见下方隔离约束。
-- Linux 每个 Thread 使用独立 named permission profile；Windows 关闭原生本地执行工具，通过独立 Python 运行时和 LPAC 执行。只读运行时与当前 Workspace 为授权范围，命令禁网，不继承 Agent 凭证环境变量；元数据目录移除继承写授权并设置只读权限。
+- Linux 每个 Thread 使用独立 named permission profile；Windows 关闭原生本地执行工具，通过独立 Python 运行时和 LPAC 执行。只读运行时与当前 Workspace 为授权范围，命令禁网，不继承 Agent 凭证环境变量；私有数据位于 Workspace 外，独立执行临时区按项目授权。用户项目元数据目录可由隔离命令修改，Agent 不再创建占位目录。
 - Agent 在注册前进行真实访问自检，Windows 通过后上报 `WINDOWS_LPAC_V1`，Linux 通过后上报 `LINUX_PROJECT_PROFILE_V1`；失败停止启动。
 - Server 同时支持上述 Windows 和 Linux 能力，不再将旧 `WINDOWS_PROJECT_PROFILE` 视为读取隔离。Windows 当前固定验证 Codex 0.153.0，需要配置 `windows-python` 专用运行时。
 - Linux 首版允许一个 Agent 下的多个项目工作区，原生安装包采用核心现有默认 `max-workspaces=0`（不设数量上限），可配置大于 1 的容量上限；该配置约束项目工作区总数，不是父目录数量或 Turn 并发数。每个项目独占 Workspace，重启和重试须保留原归属；安装包配置与多项目隔离验收仍待完成。
 - 每个会话有独立 App Server 进程，恢复时校验持久化 Thread 的 Workspace 归属；支持流式事件、中断和幂等重试。
 
 `deploy/` 仅保留 Windows 运行时与工具链准备脚本。原生安装包需提供独立于源码 Windows 开发配置的部署配置；如果目标系统阻止 sandbox，应配置受支持环境，不得绕过自检。
+
+工作区外部私有存储、Skill 文本加载及其限制见 [Agent 私有存储架构](../../docs/architecture/agent-private-storage.md)。不提供旧运行数据迁移，不识别或搬移用户工作区内的 `.harness`、`.harness-workspace.json`。旧会话不迁移恢复，升级后在原项目下新建会话。
 
 ## 注册与状态
 
@@ -45,7 +55,7 @@ Turn 使用 `approvalPolicy=on-request`。Agent 拒绝原生命令/文件扩权�
 
 工作区文件操作 V1 增加重命名、单文件移动、检查后删除和多选 ZIP。Agent 的 Windows 实现使用 JNA 的句柄操作：禁止覆盖目标、固定父目录与源对象，并用卷身份和完整 128 位文件 ID 生成 `entryRevision`。没有安全句柄支持的平台不声明 `WORKSPACE_FILE_MUTATIONS_V1`；文件系统不能提供可靠身份时明确拒绝。ZIP 使用 `WORKSPACE_ARCHIVE_DOWNLOAD_V1`，Windows 以固定路径句柄读取，其他平台要求 `SecureDirectoryStream`。
 
-所有层级的 `.codex`、`.git`、`.harness`、`.agent`、`.agents`、`.harness-workspace.json` 和 `.harness-upload-` 临时前缀统一隐藏并保护。目录重命名完整复核子树，目录删除按确认清单逐项执行；平台管理的 Turn 与变更互斥，收到中断确认后仍等实际执行结束再释放。操作无法确认或进程不能确认停止时保留占用，禁止自动重试变更。此协调不锁住外部程序新建文件，目录重命名不承诺外部写入的原子子树快照。
+文件接口（不代表隔离命令 ACL）中，所有层级的 `.codex`、`.git`、`.harness`、`.agent`、`.agents`、`.harness-workspace.json` 和 `.harness-upload-` 临时前缀统一隐藏并保护。目录重命名完整复核子树，目录删除按确认清单逐项执行；平台管理的 Turn 与变更互斥，收到中断确认后仍等实际执行结束再释放。操作无法确认或进程不能确认停止时保留占用，禁止自动重试变更。此协调不锁住外部程序新建文件，目录重命名不承诺外部写入的原子子树快照。
 
 本机 ZIP 默认最多 100 个普通文件、源合计 100 MiB、输出 110 MiB，单个源沿用 `max-attachment-bytes`（20 MiB）。对应配置为 `workspace-archive-max-files`、`workspace-archive-max-total-bytes`、`workspace-archive-max-output-bytes`；Server 取两端较小限额。ZIP 保留 UTF-8 工作区相对路径，条目 comment 保存源 SHA-256，整个 ZIP 通过 SHA-256 传输校验。
 

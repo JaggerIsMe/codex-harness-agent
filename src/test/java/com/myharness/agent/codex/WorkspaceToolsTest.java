@@ -50,10 +50,15 @@ class WorkspaceToolsTest {
                 *** End Patch
                 """));assertEquals("old\n",Files.readString(project.resolve("a.txt")));
     }
-    @Test void ambiguousContextAndProtectedOrExternalPathsAreRejected() throws Exception {
+    @Test void ambiguousContextAndExternalPathsAreRejectedButUserDotfilesAreWritable() throws Exception {
         Path project=project();Files.writeString(project.resolve("a.txt"),"same\nsame\n");
         assertThrows(java.io.IOException.class,()->WorkspacePatchTool.apply(project,"*** Begin Patch\n*** Update File: a.txt\n@@\n-same\n+new\n*** End Patch"));
-        for(String path:new String[]{"../outside.txt","C:/outside.txt","a.txt:stream",".git/config","nested/.codex/config.toml","CON.txt","a.txt ","\\\\server\\file"})
+        Files.createDirectories(project.resolve(".git"));Files.createDirectories(project.resolve("nested/.codex"));
+        for(String path:new String[]{".git/config","nested/.codex/config.toml"}) {
+            WorkspacePatchTool.apply(project,"*** Begin Patch\n*** Add File: "+path+"\n+x\n*** End Patch");
+            assertEquals("x\n",Files.readString(project.resolve(path)));
+        }
+        for(String path:new String[]{"../outside.txt","C:/outside.txt","a.txt:stream","CON.txt","a.txt ","\\\\server\\file"})
             assertThrows(java.io.IOException.class,()->WorkspacePatchTool.apply(project,"*** Begin Patch\n*** Add File: "+path+"\n+x\n*** End Patch"),path);
         assertEquals("same\nsame\n",Files.readString(project.resolve("a.txt")));
     }

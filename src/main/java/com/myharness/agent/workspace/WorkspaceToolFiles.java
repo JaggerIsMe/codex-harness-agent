@@ -22,7 +22,7 @@ public final class WorkspaceToolFiles implements AutoCloseable {
     }
     private Path checked(String relative) throws IOException {
         WorkspaceFileService.validateRelative(relative);
-        if(relative.isEmpty()||!WorkspacePathPolicy.visible(relative))throw new IOException("工具不能访问受保护的工作区路径");
+        if(relative.isEmpty())throw new IOException("工具需要工作区内的文件路径");
         Path path=root.resolve(relative).normalize();
         if(!path.startsWith(root))throw new IOException("路径超出工作区");
         owned.add(WindowsWorkspaceHandles.pin(root,path.getParent()));

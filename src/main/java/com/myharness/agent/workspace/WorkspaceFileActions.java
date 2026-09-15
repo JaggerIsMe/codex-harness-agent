@@ -43,7 +43,7 @@ final class WorkspaceFileActions {
         // These are Agent-owned temporary namespaces, never Workspace paths. Do not follow links or recurse.
         cleanDirectory(plans,120_000L,name -> name.matches("[a-f0-9-]{36}\\.(json|used)"));
         cleanDirectory(properties.getDataDir().resolve("workspace-transfers"),86_400_000L,
-                name -> name.matches("(archive-|download-).+\\.(zip|part)"));
+                name -> name.matches("(archive-|download-|upload-).+\\.(zip|part)"));
         cleanDirectory(properties.getDataDir(),86_400_000L,name -> name.matches("workspace-items-.+\\.json"));
     }
     private void cleanDirectory(Path directory,long age,java.util.function.Predicate<String> owned) throws IOException {
