@@ -24,6 +24,9 @@ final class WindowsCommandTool {
     }
 
     static WindowsIsolatedCommand.Result execute(Path workspace, AgentProperties properties, JsonNode arguments, ObjectMapper json) throws IOException {
+        return execute(workspace,properties,arguments,json,null);
+    }
+    static WindowsIsolatedCommand.Result execute(Path workspace, AgentProperties properties, JsonNode arguments, ObjectMapper json, SkillExecutionScope scope) throws IOException {
         if (!arguments.isObject()) throw new CodexException("命令参数必须为对象");
         for (var fields = arguments.fieldNames(); fields.hasNext(); )
             if (!Set.of("program", "args", "timeout_seconds").contains(fields.next()))
@@ -88,10 +91,12 @@ final class WindowsCommandTool {
         boolean batch = executable.toLowerCase(java.util.Locale.ROOT).endsWith(".cmd") || executable.toLowerCase(java.util.Locale.ROOT).endsWith(".bat");
         if (batch && argv.stream().anyMatch(value -> value.chars().anyMatch(c -> "%!^&|<>\"\r\n".indexOf(c) >= 0)))
             throw new CodexException("批处理启动器的参数不支持 Shell 控制字符；请使用直接的 exe 入口或隔离脚本");
-        String encoded = java.util.Base64.getEncoder().encodeToString(json.writeValueAsBytes(argv));
+        List<String> command=program.equals("python") ? PythonCommand.withManagedImports(argv,json) : argv;
+        String encoded = java.util.Base64.getEncoder().encodeToString(json.writeValueAsBytes(command));
         String script = "import base64,json,subprocess,sys,os\nargv=json.loads(base64.b64decode('" + encoded + "'))\n"
                 + (batch ? "q=chr(34)\nargv=q+os.environ['ComSpec']+q+' /d /s /c '+q+' '.join(q+arg+q for arg in argv)+q\n" : "")
                 + "result=subprocess.run(argv,shell=False)\nsys.exit(result.returncode)";
+        if(scope!=null)return WindowsIsolatedCommand.executeScoped(project,script,timeout,python,scope,homes,environment,1800);
         return WindowsIsolatedCommand.executeTool(project, script, timeout, python, com.myharness.agent.workspace.AgentStorage.executionDirectory(properties.getDataDir(), project), homes, environment);
     }
 }

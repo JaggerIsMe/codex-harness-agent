@@ -36,6 +36,7 @@ public class AppServerCodexAdapter implements CodexGateway {
     private static final String DISABLED_INHERITED_MCP_COMMAND="harness-disabled-mcp";
     private static final String INTERACTIVE_APPROVAL_POLICY="on-request";
     private java.util.Set<Path> expertSkillPaths=java.util.Set.of();
+    private SkillExecutionScope executionScope;
     private static final Logger LOGGER = LoggerFactory.getLogger(AppServerCodexAdapter.class);
 
     private final AgentProperties properties;
@@ -81,6 +82,7 @@ public class AppServerCodexAdapter implements CodexGateway {
         if (properties.isStrictProjectIsolation() && !hasText(options.getProjectId())) {
             throw new CodexException("Project ID is required in strict project isolation mode");
         }
+        executionScope=SkillExecutionScope.prepare(properties.getDataDir(),options);
         prepareNativeWorkspace(options.getWorkspace());
         activateModelRuntime(options.getModelRuntime());
         ObjectNode params = objectMapper.createObjectNode();
@@ -105,7 +107,7 @@ public class AppServerCodexAdapter implements CodexGateway {
         if(historyProxy!=null) historyProxy.bind(threadId);
         threadWorkspaces.put(threadId, options.getWorkspace());
         if(supportsImageInput(options))imageInputThreads.add(threadId);else imageInputThreads.remove(threadId);
-        if(nativeWindows()) markNativeThread(threadId,options.getWorkspace(),true);
+        markNativeThread(threadId,options.getWorkspace(),true);
         rememberModel(threadId,result,options.getModel());
         return threadId;
     }
@@ -119,6 +121,7 @@ public class AppServerCodexAdapter implements CodexGateway {
         if (properties.isStrictProjectIsolation() && !hasText(options.getProjectId())) {
             throw new CodexException("Project ID is required in strict project isolation mode");
         }
+        executionScope=SkillExecutionScope.prepare(properties.getDataDir(),options);
         prepareNativeWorkspace(options.getWorkspace());
         activateModelRuntime(options.getModelRuntime());
         // Verify the persisted root before applying overrides: resume must not move another project's history.
@@ -132,7 +135,7 @@ public class AppServerCodexAdapter implements CodexGateway {
             throw failure;
         }
         verifyThreadBinding(stored, threadId, options.getWorkspace());
-        if(nativeWindows()) markNativeThread(threadId,options.getWorkspace(),false);
+        markNativeThread(threadId,options.getWorkspace(),false);
         if ("active".equals(stored.path("status").path("type").asText())) {
             throw new CodexException("Cannot resume a Codex thread with an active Turn");
         }
@@ -183,12 +186,12 @@ public class AppServerCodexAdapter implements CodexGateway {
 
     private void markNativeThread(String threadId,Path workspace,boolean create) {
         try {
-            Path directory=properties.getDataDir().resolve("native-windows-threads");
+            Path directory=properties.getDataDir().resolve("skill-readonly-threads-v1");
             Path marker=directory.resolve(java.util.UUID.nameUUIDFromBytes(threadId.getBytes(StandardCharsets.UTF_8))+".txt");
             String binding=workspace.toRealPath().toString();
             if(create) {java.nio.file.Files.createDirectories(directory);java.nio.file.Files.writeString(marker,binding);}
             else if(!java.nio.file.Files.isRegularFile(marker) || !java.nio.file.Files.readString(marker).equals(binding))
-                throw new CodexException("此会话使用旧 Windows 执行工具；请在当前项目中新建会话以启用读取隔离，旧历史保持可查看");
+                throw new CodexException("此会话尚未启用 Skill 按需读取；请新建会话，旧历史保持可查看");
         } catch(IOException failure) {throw new CodexException("Cannot verify native Windows thread binding",failure);}
     }
 
@@ -200,10 +203,10 @@ public class AppServerCodexAdapter implements CodexGateway {
         } catch(IOException failure) {throw new CodexException("Cannot verify Agent state isolation",failure);}
         if(java.nio.file.Files.exists(workspace.resolve(".codex/config.toml"),java.nio.file.LinkOption.NOFOLLOW_LINKS))
             throw new CodexException("Windows 隔离项目不加载 .codex/config.toml；请由管理员将需要的配置迁入受控 Agent 配置");
-        try {
-            var probe=WindowsIsolatedCommand.execute(workspace,"pass",15,properties.getWindowsPython(),com.myharness.agent.workspace.AgentStorage.executionDirectory(properties.getDataDir(),workspace));
+        {
+            var probe=WindowsIsolatedCommand.executeScoped(workspace,"pass",15,properties.getWindowsPython(),executionScope,List.of(),Map.of(),120);
             if(probe.exitCode()!=0) throw new CodexException("Cannot initialize Windows project execution: "+probe.output());
-        } catch(IOException failure) {throw new CodexException("Cannot prepare isolated execution directory",failure);}
+        }
     }
 
     private String profileId(Path workspace) {
@@ -286,7 +289,9 @@ public class AppServerCodexAdapter implements CodexGateway {
 
     private static String expertInstructions(String expertInstructions,List<CodexSkillInput> verifiedSkills) {
         if(verifiedSkills.isEmpty()) return expertInstructions;
-        String context=PrivateSkillContext.load(verifiedSkills);
+        String context="Skill 目录已对当前命令沙箱只读开放。仅在任务适用时先读取对应 SKILL.md，再读取必要资源。"
+                +"Windows 使用 harness_execute 的 Python 文件读取能力；脚本使用已配置解释器和预装依赖，缺少依赖时报告，不自动安装。"
+                +"使用原生 Skill 索引中的路径。Skill 目录不可写，输出写入 Workspace，缓存写入授权临时目录。\n";
         return (expertInstructions==null ? "" : expertInstructions+"\n\n")+context;
     }
 
@@ -340,16 +345,16 @@ public class AppServerCodexAdapter implements CodexGateway {
         params.put("permissions",profile);
         ObjectNode config=params.withObject("config");
         config.put("default_permissions",profile);
-        config.putObject("permissions").set(profile,ProjectPermissionProfile.policy(objectMapper,properties.getDataDir(),workspace));
+        config.putObject("permissions").set(profile,ProjectPermissionProfile.policy(objectMapper,properties.getDataDir(),workspace,executionScope));
         if("Linux".equalsIgnoreCase(System.getProperty("os.name"))) {
             var environment=config.putObject("shell_environment_policy").put("inherit","none");
             environment.putObject("set").put("PATH",System.getProperty("java.home")+"/bin:/usr/local/bin:/usr/bin:/bin")
                     .put("JAVA_HOME",System.getProperty("java.home")).put("LANG","C.UTF-8");
-            try {
-                String temp=com.myharness.agent.workspace.AgentStorage.executionDirectory(properties.getDataDir(),workspace).toString();
+            {
+                String temp=executionScope.temporaryDirectory().toString();
                 environment.withObject("set").put("TMPDIR",temp).put("HOME",temp).put("XDG_CACHE_HOME",temp)
                         .put("NPM_CONFIG_CACHE",temp+"/npm-cache").put("MAVEN_OPTS","-Dmaven.repo.local="+temp+"/maven-repository");
-            } catch(IOException failure) {throw new CodexException("Cannot prepare Linux execution environment",failure);}
+            }
         }
     }
 
@@ -903,7 +908,7 @@ public class AppServerCodexAdapter implements CodexGateway {
             ObjectNode result=response.putObject("result");String output=null;
             try {
                 if(WindowsCommandTool.NAME.equals(tool)) {
-                    var execution=WindowsCommandTool.execute(workspace,properties,params.path("arguments"),objectMapper);
+                    var execution=WindowsCommandTool.execute(workspace,properties,params.path("arguments"),objectMapper,executionScope);
                     result.put("success",execution.exitCode()==0);output="Exit code: "+execution.exitCode()+"\n"+execution.output();
                 } else if(WorkspaceImageGenerationTool.NAME.equals(tool)) {
                     if(!controlledImages())throw new CodexException("当前模型未接通图片生成服务");
@@ -915,7 +920,7 @@ public class AppServerCodexAdapter implements CodexGateway {
                 } else if(WorkspacePatchTool.NAME.equals(tool)) {
                     output=WorkspacePatchTool.apply(workspace,WindowsExecutionTools.textArgument(params.path("arguments"),"patch",131072));result.put("success",true);
                 } else {
-                    var execution=WindowsExecutionTools.execute(workspace,properties,params.path("arguments"));
+                    var execution=WindowsExecutionTools.execute(workspace,properties,params.path("arguments"),executionScope);
                     result.put("success",execution.exitCode()==0);output="Exit code: "+execution.exitCode()+"\n"+execution.output();
                 }
             } catch(Exception failure) {result.put("success",false);output=CodexDiagnostics.redact(failure.getMessage());}

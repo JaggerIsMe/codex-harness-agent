@@ -22,6 +22,16 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class AppServerCodexAdapterTest {
+    @Test void refusesThreadWithoutReadOnlyModeMarkerBeforeResume(@TempDir Path workspace) throws Exception {
+        var adapter=new StoredThreadAdapter(workspace);
+        Path marker=storageProperties(workspace).getDataDir().resolve("skill-readonly-threads-v1")
+                .resolve(java.util.UUID.nameUUIDFromBytes("original-thread".getBytes(StandardCharsets.UTF_8))+".txt");
+        Files.delete(marker);
+        var failure=assertThrows(CodexException.class,()->adapter.resumeThread("original-thread",new CodexThreadOptions("project",workspace,null)));
+        assertTrue(failure.getMessage().contains("请新建会话"));
+        assertFalse(adapter.methods.contains("thread/resume"));
+        assertFalse(adapter.methods.contains("thread/start"));
+    }
     @Test void stillRejectsUnauthorizedMcpWhenRuntimeIgnoresPluginDisable(@TempDir Path workspace) {
         var mapper=new ObjectMapper();
         for(boolean resume:List.of(false,true)) {
@@ -252,10 +262,10 @@ class AppServerCodexAdapterTest {
         var request=adapter.params.getLast();
         String instructions=request.path("collaborationMode").path("settings").path("developer_instructions").asText();
         assertTrue(instructions.contains("Use the bound Skills"));
-        assertTrue(instructions.contains("HELLO_FROM_HARNESS_SKILL"));
+        assertFalse(instructions.contains("HELLO_FROM_HARNESS_SKILL"));
         assertFalse(instructions.contains(skill.toRealPath().toString()));
-        assertTrue(instructions.contains("可选能力"));
-        assertTrue(instructions.contains("私有技能路径不能通过文件工具或命令访问"));
+        assertTrue(instructions.contains("仅在任务适用时"));
+        assertFalse(instructions.contains("私有技能路径不能通过文件工具或命令访问"));
         assertEquals("Hello",request.path("input").get(0).path("text").asText());
         assertEquals(1,request.path("input").size());
         assertFalse(request.toString().contains("$review"));
@@ -502,7 +512,12 @@ class AppServerCodexAdapterTest {
     }
 
     private static AgentProperties storageProperties(Path workspace) {
-        var properties=new AgentProperties();properties.setDataDir(workspace.resolveSibling(workspace.getFileName()+"-data"));return properties;
+        var properties=new AgentProperties();properties.setDataDir(workspace.resolveSibling(workspace.getFileName()+"-data"));
+        try {
+            Path markers=Files.createDirectories(properties.getDataDir().resolve("skill-readonly-threads-v1"));
+            for(String id:List.of("original-thread","thread-local","plugin-thread")) Files.writeString(markers.resolve(java.util.UUID.nameUUIDFromBytes(id.getBytes(StandardCharsets.UTF_8))+".txt"),workspace.toRealPath().toString());
+        } catch(java.io.IOException failure) {throw new AssertionError(failure);}
+        return properties;
     }
     private static Path privateRoot(Path workspace) throws Exception {
         return com.myharness.agent.workspace.AgentStorage.workspaceRoot(storageProperties(workspace).getDataDir(),workspace);

@@ -48,16 +48,25 @@ public class ProjectIsolationCheck {
             Path data=properties.getDataDir().toAbsolutePath();Files.createDirectories(data);
             if(data.toRealPath().startsWith(properties.getWindowsPython().toRealPath().getParent()))
                 throw new CodexException("独立 Python 目录不得包含 Agent 状态或凭据目录");
+            WindowsCommandLease.recover(data);
             root=Files.createTempDirectory(data,"windows-isolation-check-");
             Path project=Files.createDirectory(root.resolve("project"));
             Path outside=Files.writeString(root.resolve("outside.txt"),"OUTSIDE");
             Files.writeString(project.resolve("inside.txt"),"INSIDE");
-            var result=WindowsIsolatedCommand.execute(project,"""
+            Path skillRoot=Files.createDirectory(root.resolve("skill"));
+            Path skill=Files.writeString(skillRoot.resolve("SKILL.md"),"SKILL_PROBE");
+            var scope=new SkillExecutionScope("probe",Files.createDirectory(root.resolve("execution")),List.of(skillRoot));
+            var result=WindowsIsolatedCommand.executeScoped(project,"""
                     from pathlib import Path
                     import subprocess, os
                     assert Path('inside.txt').read_text()=='INSIDE'
                     Path('created.txt').write_text('WRITE_OK')
                     outside=Path(%s)
+                    skill=Path(%s)
+                    assert skill.read_text()=='SKILL_PROBE'
+                    try: skill.write_text('CHANGED')
+                    except PermissionError: pass
+                    else: raise AssertionError('Skill write allowed')
                     for path in [outside, Path('../outside.txt')]:
                         try: path.read_bytes()
                         except PermissionError: pass
@@ -75,15 +84,19 @@ public class ProjectIsolationCheck {
                     assert not temp.is_relative_to(Path.cwd())
                     (temp/'probe.txt').write_text('TEMP_OK')
                     print('HARNESS_ISOLATION_OK')
-                    """.formatted(json.writeValueAsString(outside.toAbsolutePath().toString())),30,properties.getWindowsPython(),Files.createDirectory(root.resolve("execution")));
+                    """.formatted(json.writeValueAsString(outside.toAbsolutePath().toString()),json.writeValueAsString(skill.toString())),30,properties.getWindowsPython(),scope,List.of(),java.util.Map.of(),120);
             if(result.exitCode()!=0 || !result.output().lines().anyMatch("HARNESS_ISOLATION_OK"::equals)
                     || !Files.readString(outside).equals("OUTSIDE") || !Files.readString(project.resolve("created.txt")).equals("WRITE_OK"))
                 throw new CodexException("Windows LPAC isolation self-test failed; execution remains disabled: "+result.output());
+            var other=new SkillExecutionScope("other",Files.createDirectory(root.resolve("other-execution")),List.of());
+            var denied=WindowsIsolatedCommand.executeScoped(project,"from pathlib import Path;Path("+json.writeValueAsString(skill.toString())+").read_text()",
+                    15,properties.getWindowsPython(),other,List.of(),java.util.Map.of(),120);
+            if(denied.exitCode()==0 || !denied.output().contains("PermissionError") || !Files.readString(skill).equals("SKILL_PROBE"))
+                throw new CodexException("Windows Skill grants escaped their command scope");
         } catch(CodexException failure) {throw failure;}
         catch(Exception failure) {throw new CodexException("Cannot verify Windows native read isolation",failure);}
         finally {
             if(root!=null) try {
-                WindowsIsolatedCommand.cleanupProfile(root.resolve("project"),properties.getWindowsPython());
                 try(var paths=Files.walk(root)) {for(Path path:paths.sorted(Comparator.reverseOrder()).toList()) Files.deleteIfExists(path);}
             } catch(Exception failure) {throw new CodexException("Cannot clean Windows isolation self-test",failure);}
         }
@@ -97,10 +110,18 @@ public class ProjectIsolationCheck {
             Path workspace=Files.createDirectory(root.resolve("project"));
             Files.writeString(workspace.resolve("inside.txt"),"INSIDE");
             Path outside=Files.writeString(root.resolve("outside.txt"),"OUTSIDE");
+            Path skillRoot=Files.createDirectory(root.resolve("skill"));
+            Files.writeString(skillRoot.resolve("SKILL.md"),"SKILL_PROBE");
+            var scope=new SkillExecutionScope("probe",Files.createDirectory(root.resolve("execution")),List.of(skillRoot));
             Path script=Files.writeString(workspace.resolve("probe.sh"),"""
                     set -eu
                     test "$(cat ./inside.txt)" = INSIDE
                     printf WRITE_OK > ./created.txt
+                    test "$(cat "$2/SKILL.md")" = SKILL_PROBE
+                    if (printf CHANGED > "$2/SKILL.md") 2>/dev/null; then exit 25; fi
+                    if (printf CHANGED > "$2/new.txt") 2>/dev/null; then exit 26; fi
+                    if ls "$2/.." >/dev/null 2>&1; then exit 27; fi
+                    printf TEMP_OK > "$3/probe.txt"
                     ln -s "$1" ./outside-link
                     if cat ../outside.txt >/dev/null 2>&1; then exit 21; fi
                     if cat "$1" >/dev/null 2>&1; then exit 22; fi
@@ -109,8 +130,8 @@ public class ProjectIsolationCheck {
                     printf 'HARNESS_ISOLATION_OK\\n'
                     """);
             var command=new ArrayList<String>(List.of(properties.getCodexCommand(),"sandbox","-P","harness-isolation-check","-C",workspace.toString()));
-            command.addAll(ProjectPermissionProfile.commandOverrides(json,"harness-isolation-check",root,workspace));
-            command.addAll(List.of("--","/bin/sh",script.toString(),outside.toString()));
+            command.addAll(ProjectPermissionProfile.commandOverrides(json,"harness-isolation-check",root,workspace,scope));
+            command.addAll(List.of("--","/bin/sh",script.toString(),outside.toString(),skillRoot.toString(),scope.temporaryDirectory().toString()));
             Path output=root.resolve("probe-output.txt");
             process=launch(command,workspace,output);
             if(!process.waitFor(properties.getCodexRequestTimeoutSeconds(),TimeUnit.SECONDS))

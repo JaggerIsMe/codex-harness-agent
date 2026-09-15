@@ -221,6 +221,8 @@ class ImageGenerationTransportTest {
                 runtime.setModelId("fixture-model");
                 runtime.setApiKey("synthetic-managed-token");
             }
+            Path markers=java.nio.file.Files.createDirectories(properties.getDataDir().resolve("skill-readonly-threads-v1"));
+            java.nio.file.Files.writeString(markers.resolve(java.util.UUID.nameUUIDFromBytes(thread.getBytes(StandardCharsets.UTF_8))+".txt"),workspace.toRealPath().toString());
             adapter.resumeThread(thread, new CodexThreadOptions("project", workspace, runtime));
             var response = client.send(request(base.get() + "/images/generations", "{}".getBytes(StandardCharsets.UTF_8)).build(), HttpResponse.BodyHandlers.ofByteArray());
             assertEquals("openai".equals(provider) ? 200 : 404, response.statusCode());

@@ -35,7 +35,7 @@ final class WindowsExecutionTools {
         config.put("project_doc_max_bytes",0);
         if(newThread) {
             var tool=params.putArray("dynamicTools").addObject().put("type","function").put("name",NAME)
-                    .put("description","Run Python 3 in this project's Windows LPAC boundary. Use pathlib for reading/searching/editing files and subprocess for allowed Windows programs. Read project AGENTS.md through this tool if present. Workspace files are writable; external user files and command networking are inaccessible. Python and Windows system runtime files are read-only exceptions. PowerShell is not supported in this boundary. No permission escalation is available. Each call is synchronous and ends all child processes on completion, with a maximum 120 second timeout. Use request_user_input for execution confirmation before sensitive operations.");
+                    .put("description","Run Python 3 in this project's Windows LPAC boundary. Use pathlib for reading/searching/editing files and subprocess for allowed Windows programs. Read project AGENTS.md through this tool if present. Workspace files are writable; external user files and command networking are inaccessible. The current expert Skill directories and configured runtime files are read-only exceptions. Skill scripts may use preinstalled dependencies; report missing dependencies without installing them. PowerShell is not supported in this boundary. No permission escalation is available. Each call is synchronous and ends all child processes on completion, with a maximum 120 second timeout. Use request_user_input for execution confirmation before sensitive operations.");
             var schema=tool.putObject("inputSchema").put("type","object").put("additionalProperties",false);
             schema.putArray("required").add("script");var fields=schema.putObject("properties");
             fields.putObject("script").put("type","string").put("description","Python source to run in the project directory.").put("minLength",1).put("maxLength",12000);
@@ -89,11 +89,15 @@ final class WindowsExecutionTools {
     }
 
     static WindowsIsolatedCommand.Result execute(Path workspace,com.myharness.agent.config.AgentProperties properties,JsonNode arguments) throws java.io.IOException {
+        return execute(workspace,properties,arguments,null);
+    }
+    static WindowsIsolatedCommand.Result execute(Path workspace,com.myharness.agent.config.AgentProperties properties,JsonNode arguments,SkillExecutionScope scope) throws java.io.IOException {
         if(!arguments.isObject() || !arguments.path("script").isTextual()) throw new CodexException("Invalid isolated command arguments");
         for(var fields=arguments.fieldNames();fields.hasNext();) {
             String key=fields.next();if(!key.equals("script") && !key.equals("timeout_seconds")) throw new CodexException("Unsupported isolated command field: "+key);
         }
         if(arguments.has("timeout_seconds") && !arguments.path("timeout_seconds").isIntegralNumber()) throw new CodexException("Command timeout must be an integer");
+        if(scope!=null)return WindowsIsolatedCommand.executeScoped(workspace,arguments.path("script").asText(),arguments.path("timeout_seconds").asInt(60),properties.getWindowsPython(),scope,List.of(),java.util.Map.of(),120);
         return WindowsIsolatedCommand.execute(workspace,arguments.path("script").asText(),arguments.path("timeout_seconds").asInt(60),properties.getWindowsPython(),com.myharness.agent.workspace.AgentStorage.executionDirectory(properties.getDataDir(),workspace));
     }
 }

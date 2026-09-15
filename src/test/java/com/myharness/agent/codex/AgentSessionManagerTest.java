@@ -68,7 +68,7 @@ class AgentSessionManagerTest {
         assertEquals("WAITING_USER",((com.myharness.agent.entity.dto.TurnTerminalEventDTO)event.getPayload()).getOrchestration().path("state").asText());
         org.junit.jupiter.api.Assertions.assertNull(gateway.lastInput);assertEquals(0,manager.activeTurnCount());
     }
-    @Test void forwardsFrozenExpertAndExplicitClearOnConsecutiveTurns() {
+    @Test void preservesFrozenExpertWhenAnIncompatibleClearIsRejected() {
         manager.startThread(thread("3"));
         var first=turn("3","7");var expert=new com.myharness.agent.entity.dto.ExpertRuntimeDTO();
         expert.setProjectRevision(1L);expert.setRuntimeKey("a".repeat(64));expert.setExpertVersionId(100L);expert.setSystemPrompt("Java expert");first.setExpertRuntime(expert);
@@ -77,15 +77,16 @@ class AgentSessionManagerTest {
         var frozen=gateway.lastInput;
         gateway.listener.onCompleted("codex-turn-1","completed",null);
         var next=turn("3","8");var plain=new com.myharness.agent.entity.dto.ExpertRuntimeDTO();plain.setProjectRevision(1L);plain.setRuntimeKey("b".repeat(64));next.setExpertRuntime(plain);
-        manager.startTurn(next);
-        org.junit.jupiter.api.Assertions.assertTrue(gateway.lastInput.isManagedExpert());
-        org.junit.jupiter.api.Assertions.assertNull(gateway.lastInput.getExpertInstructions());
+        var failure=assertThrows(AgentOperationException.class,()->manager.startTurn(next));
+        assertEquals("NEW_CONVERSATION_REQUIRED",failure.getErrorCode());
+        org.junit.jupiter.api.Assertions.assertSame(frozen,gateway.lastInput);
+        assertEquals(2,gateway.threadSequence);
         assertEquals("Java expert",frozen.getExpertInstructions());
     }
     @TempDir
     Path temporaryDirectory;
 
-    @Test void switchesRuntimeOnlyWhenRuntimeChangesWithoutInjectingBusinessHistory() {
+    @Test void resumesSameRuntimeAndRejectsIncompatibleReplacementWithoutInjectingBusinessHistory() {
         manager.startThread(thread("3"));
         var first=expertTurn("7","a","codex-thread-1",null);
         manager.startTurn(first);
@@ -97,8 +98,11 @@ class AgentSessionManagerTest {
         assertEquals(2,gateway.threadSequence);assertEquals("do work",gateway.lastInput.getMessage());
         gateway.listener.onCompleted("codex-turn-1","completed",null);events.clear();
         var next=expertTurn("9","b","codex-thread-2","a");next.getExpertRuntime().setExpertVersionId(200L);
-        manager.startTurn(next);assertEquals("codex-thread-3",gateway.startedTurnThreadId);
-        assertEquals(List.of("codex-thread-1","codex-thread-2"),gateway.closedThreads);
+        var failure=assertThrows(AgentOperationException.class,()->manager.startTurn(next));
+        assertEquals("NEW_CONVERSATION_REQUIRED",failure.getErrorCode());
+        assertEquals("codex-thread-2",gateway.startedTurnThreadId);
+        assertEquals(2,gateway.threadSequence);
+        assertEquals(List.of("codex-thread-1"),gateway.closedThreads);
     }
     @Test void restartingAgentRestoresSameExpertThread() {
         var command=expertTurn("7","a","persisted-thread","a");

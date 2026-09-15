@@ -481,13 +481,14 @@ public class AgentSessionManager {
     private boolean prepareExpertThread(SessionContext session,StartTurnCommandDTO command,java.util.List<CodexSkillInput> skills,
                                          com.myharness.agent.attachment.AttachmentPreparation cancellation) {
         var runtime=command.getExpertRuntime();
-        if((runtime.getSchemaVersion()!=2 && runtime.getSchemaVersion()!=3 && runtime.getSchemaVersion()!=4) || runtime.getRuntimeKey()==null || !runtime.getRuntimeKey().matches("[0-9a-f]{64}"))
+        if(runtime.getSchemaVersion()!=5 || runtime.getRuntimeKey()==null || !runtime.getRuntimeKey().matches("[0-9a-f]{64}"))
             throw new AgentOperationException("EXPERT_CONFIG_INVALID","需要受支持的会话专家运行标识");
         if(runtime.getSchemaVersion()>=3 && session.expertId!=null && !session.expertId.equals(runtime.getExpertId()))
             throw new AgentOperationException("CONVERSATION_BINDING_MISMATCH","Conversation 不能切换到另一个 Expert");
         var options=new CodexThreadOptions(session.projectId,session.workspace,command.getModelRuntime())
                 .withOrchestration(command.getOrchestration()!=null && !command.getOrchestration().isNull())
-                .withExpertRuntime(skills,runtime.getMcpServers()==null ? java.util.List.of() : runtime.getMcpServers());
+                .withExpertRuntime(skills,runtime.getMcpServers()==null ? java.util.List.of() : runtime.getMcpServers())
+                .withExecutionIdentity(session.conversationId,runtime.getRuntimeKey());
         String nextModelRuntimeKey=command.getModelRuntime()==null?null:command.getModelRuntime().getRuntimeKey();
         boolean modelChanged=!java.util.Objects.equals(session.modelRuntimeKey,nextModelRuntimeKey);
         if(java.util.Objects.equals(session.runtimeKey,runtime.getRuntimeKey())) {
@@ -510,6 +511,8 @@ public class AgentSessionManager {
                 if(modelChanged||isExplicitModelTarget(command)||!command.isRecreateUnstartedThread()) throw missing;
             }
         }
+        if(session.runtimeKey!=null && !session.runtimeKey.equals(runtime.getRuntimeKey()))
+            throw new AgentOperationException("NEW_CONVERSATION_REQUIRED","旧会话不能切换到不兼容的 Skill 运行模式，请新建会话");
         cancellation.check();String previous=session.codexThreadId;
         String next=codexGateway.startThread(options);
         try {

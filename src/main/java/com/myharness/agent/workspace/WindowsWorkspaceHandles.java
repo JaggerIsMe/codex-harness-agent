@@ -19,7 +19,7 @@ public final class WindowsWorkspaceHandles implements AutoCloseable {
     }
     /** Exclusive data handle: no path reopening and no shared hard-link objects. */
     static DataEntry data(Path path,boolean write,boolean create) throws IOException {
-        WinNT.HANDLE handle=Kernel32.INSTANCE.CreateFile(path.toString(),WinNT.GENERIC_READ|(write?WinNT.GENERIC_WRITE|WinNT.DELETE:0),
+        WinNT.HANDLE handle=Kernel32.INSTANCE.CreateFile(nativePath(path),WinNT.GENERIC_READ|(write?WinNT.GENERIC_WRITE|WinNT.DELETE:0),
                 0,null,create?WinNT.CREATE_NEW:WinNT.OPEN_EXISTING,WinNT.FILE_FLAG_OPEN_REPARSE_POINT,null);
         if(WinBase.INVALID_HANDLE_VALUE.equals(handle))throw error(Native.getLastError());
         try {
@@ -88,7 +88,7 @@ public final class WindowsWorkspaceHandles implements AutoCloseable {
     }
     private static WinNT.HANDLE open(Path path,boolean mutation,int share,boolean pin) throws IOException {
         // Metadata-only handles do not participate in Windows sharing checks. FILE_READ_DATA/LIST_DIRECTORY is essential.
-        WinNT.HANDLE handle=Kernel32.INSTANCE.CreateFile(path.toString(),WinNT.FILE_READ_ATTRIBUTES|(pin?WinNT.FILE_READ_DATA:0)|(mutation?WinNT.DELETE:0),
+        WinNT.HANDLE handle=Kernel32.INSTANCE.CreateFile(nativePath(path),WinNT.FILE_READ_ATTRIBUTES|(pin?WinNT.FILE_READ_DATA:0)|(mutation?WinNT.DELETE:0),
                 share,null,WinNT.OPEN_EXISTING,
                 WinNT.FILE_FLAG_BACKUP_SEMANTICS|WinNT.FILE_FLAG_OPEN_REPARSE_POINT,null);
         if(WinBase.INVALID_HANDLE_VALUE.equals(handle))throw error(Native.getLastError());
@@ -100,7 +100,7 @@ public final class WindowsWorkspaceHandles implements AutoCloseable {
         }
         return handle;
     }
-    static String identity(Path path) throws IOException {
+    public static String identity(Path path) throws IOException {
         WinNT.HANDLE handle=open(path,false,WinNT.FILE_SHARE_READ|WinNT.FILE_SHARE_WRITE|WinNT.FILE_SHARE_DELETE,false);
         try {
             Memory info=new Memory(24);info.clear();
@@ -111,6 +111,11 @@ public final class WindowsWorkspaceHandles implements AutoCloseable {
             if(empty)throw new WorkspaceFileException("UNSUPPORTED_FILESYSTEM","文件系统返回了空文件身份");
             return HexFormat.of().formatHex(info.getByteArray(0,24));
         }finally{Kernel32.INSTANCE.CloseHandle(handle);}
+    }
+    public static String nativePath(Path path) {
+        String value=path.toAbsolutePath().normalize().toString();
+        if(value.startsWith("\\\\?\\"))return value;
+        return value.startsWith("\\\\") ? "\\\\?\\UNC\\"+value.substring(2) : "\\\\?\\"+value;
     }
     static final class OpenEntry implements AutoCloseable {
         private final WinNT.HANDLE handle;

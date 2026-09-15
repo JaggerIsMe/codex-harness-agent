@@ -156,7 +156,7 @@ class WindowsIsolatedCommandTest {
         var properties=new com.myharness.agent.config.AgentProperties();properties.setDataDir(root);properties.setWindowsPython(python());
         assertEquals("UNSUPPORTED",properties.isolationMode("Windows 10"));
         new ProjectIsolationCheck(properties,new com.fasterxml.jackson.databind.ObjectMapper()).initializeFor("Windows 10");
-        assertEquals("WINDOWS_LPAC_V1",properties.isolationMode("Windows 10"));
+        assertEquals("WINDOWS_LPAC_SKILL_V2",properties.isolationMode("Windows 10"));
     }
 
     @Test void neverPromotesOutsideHardLinksIntoWorkspaceAccess(@TempDir Path root) throws Exception {

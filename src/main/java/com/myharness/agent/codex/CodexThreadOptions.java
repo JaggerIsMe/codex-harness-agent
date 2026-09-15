@@ -3,6 +3,18 @@ package com.myharness.agent.codex;
 import java.nio.file.Path;
 
 public class CodexThreadOptions {
+    private String conversationId;
+    private String expertRuntimeKey;
+    public CodexThreadOptions withExecutionIdentity(String conversationId, String runtimeKey) {
+        if (conversationId == null || !conversationId.matches("[A-Za-z0-9_-]{1,64}")
+                || runtimeKey == null || !runtimeKey.matches("[0-9a-f]{64}"))
+            throw new CodexException("Invalid conversation execution identity");
+        this.conversationId = conversationId;
+        this.expertRuntimeKey = runtimeKey;
+        return this;
+    }
+    public String getConversationId() { return conversationId; }
+    public String getExpertRuntimeKey() { return expertRuntimeKey; }
     private boolean orchestration;
     public CodexThreadOptions withOrchestration(boolean value){orchestration=value;return this;}
     public boolean isOrchestration(){return orchestration;}

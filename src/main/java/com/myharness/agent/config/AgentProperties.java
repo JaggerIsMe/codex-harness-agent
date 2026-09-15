@@ -81,8 +81,8 @@ public class AgentProperties {
 
     public String isolationMode(String osName) {
         if(!strictProjectIsolation || !readIsolationVerified) return "UNSUPPORTED";
-        if("Linux".equalsIgnoreCase(osName)) return "LINUX_PROJECT_PROFILE_V1";
-        if(osName!=null && osName.startsWith("Windows")) return "WINDOWS_LPAC_V1";
+        if("Linux".equalsIgnoreCase(osName)) return "LINUX_PROJECT_SKILL_V2";
+        if(osName!=null && osName.startsWith("Windows")) return "WINDOWS_LPAC_SKILL_V2";
         return "UNSUPPORTED";
     }
 

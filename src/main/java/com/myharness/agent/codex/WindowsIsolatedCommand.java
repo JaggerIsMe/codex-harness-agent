@@ -33,27 +33,36 @@ final class WindowsIsolatedCommand {
         return execute(directory,script,timeoutSeconds,python,temporaryDirectory,runtimes,environment,1800);
     }
     private static Result execute(Path directory,String script,int timeoutSeconds,Path python,Path temporaryDirectory,java.util.List<Path> runtimes,java.util.Map<String,String> extraEnvironment,int maximumTimeout) {
+        return execute(directory,script,timeoutSeconds,python,temporaryDirectory,runtimes,extraEnvironment,maximumTimeout,null);
+    }
+    static Result executeScoped(Path directory,String script,int timeoutSeconds,Path python,SkillExecutionScope scope,java.util.List<Path> runtimes,java.util.Map<String,String> environment,int maximumTimeout) {
+        return execute(directory,script,timeoutSeconds,python,scope.temporaryDirectory(),runtimes,environment,maximumTimeout,scope);
+    }
+    private static Result execute(Path directory,String script,int timeoutSeconds,Path python,Path temporaryDirectory,java.util.List<Path> runtimes,java.util.Map<String,String> extraEnvironment,int maximumTimeout,SkillExecutionScope scope) {
         if(!Platform.isWindows() || !Platform.is64Bit()) throw new CodexException("Windows isolation requires 64-bit Windows");
         if(script==null || script.isBlank() || script.length()>12000) throw new CodexException("Command must contain 1–12000 characters");
         if(timeoutSeconds<1 || timeoutSeconds>maximumTimeout) throw new CodexException("Command timeout must be 1–"+maximumTimeout+" seconds");
         try {
             Path workspace=directory.toRealPath();
-            String profile="harness.workspace."+UUID.nameUUIDFromBytes(workspace.toString().getBytes(StandardCharsets.UTF_8));
+            String profile=scope==null ? "harness.workspace."+UUID.nameUUIDFromBytes(workspace.toString().getBytes(StandardCharsets.UTF_8))
+                    : "harness.command."+UUID.randomUUID();
+            var granted=new java.util.ArrayList<Path>();
+            WindowsCommandLease lease=scope==null?null:new WindowsCommandLease(scope.temporaryDirectory(),profile);
             var sid=new PointerByReference();
             int created=Userenv.API.CreateAppContainerProfile(profile,profile,"Harness project execution",null,0,sid);
             if(created==0x800700b7) created=Userenv.API.DeriveAppContainerSidFromAppContainerName(profile,sid);
             if(created!=0) throw new CodexException("Cannot create Windows project isolation profile: "+Integer.toHexString(created));
             try(var workspacePin=com.myharness.agent.workspace.WindowsWorkspaceHandles.pin(workspace,workspace)) {
                 var packageSid=new WinNT.PSID(sid.getValue());
-                grant(workspace,packageSid,false,MODIFY);
-                for(String name:new String[]{".git",".codex",".agent",".agents"}) {
+                if(lease!=null)lease.beforeGrant(workspace);granted.add(workspace);grant(workspace,packageSid,false,MODIFY);
+                if(scope==null) for(String name:new String[]{".git",".codex",".agent",".agents"}) {
                     Path existing=workspace.resolve(name);
                     if(Files.exists(existing,java.nio.file.LinkOption.NOFOLLOW_LINKS))releaseLegacyReadOnly(workspace,existing,packageSid);
                 }
                 Path temp=temporaryDirectory.toRealPath();
                 if(temp.startsWith(workspace) || workspace.startsWith(temp) || !temp.equals(temporaryDirectory.toAbsolutePath().normalize()))
                     throw new CodexException("Execution temporary directory must be separate from Workspace");
-                try(var tempPin=com.myharness.agent.workspace.WindowsWorkspaceHandles.pin(temp,temp)) {grant(temp,packageSid,false,MODIFY);}
+                try(var tempPin=com.myharness.agent.workspace.WindowsWorkspaceHandles.pin(temp,temp)) {if(lease!=null)lease.beforeGrant(temp);granted.add(temp);grant(temp,packageSid,false,MODIFY);}
                 String windows=System.getenv("SystemRoot");
                 if(python==null) throw new CodexException("Windows isolation requires a dedicated Python runtime");
                 Path runtime=python.toRealPath();
@@ -61,18 +70,26 @@ final class WindowsIsolatedCommand {
                     throw new CodexException("Invalid Windows Python runtime");
                 if(workspace.startsWith(runtime.getParent()) || runtime.getParent().startsWith(workspace))
                     throw new CodexException("Python runtime must be separate from project files");
-                grant(runtime.getParent(),packageSid,false,0x1200a9);
+                if(lease!=null)lease.beforeGrant(runtime.getParent());granted.add(runtime.getParent());grant(runtime.getParent(),packageSid,false,0x1200a9);
                 for(Path toolHome:runtimes) {
                     Path home=toolHome.toRealPath();
                     if(home.getParent()==null||workspace.startsWith(home)||home.startsWith(workspace))throw new CodexException("Tool runtime must be separate from Workspace");
-                    grant(home,packageSid,false,0x1200a9);
+                    if(lease!=null)lease.beforeGrant(home);granted.add(home);grant(home,packageSid,false,0x1200a9);
+                }
+                if(scope!=null) for(Path skill:scope.readableSkills()) {
+                    SkillExecutionScope.validateTree(skill);
+                    rejectHardLinks(skill);
+                    try(var pin=com.myharness.agent.workspace.WindowsWorkspaceHandles.pin(skill,skill)) {
+                        if(lease!=null)lease.beforeGrant(skill);granted.add(skill);grant(skill,packageSid,false,0x120089);
+                    }
                 }
                 String shell=runtime.toString();
                 // Windows rewrites AppContainer profile environment values during process creation.
                 // Restore our per-project directory before evaluating any generated code.
                 String encodedTemp=Base64.getEncoder().encodeToString(temp.toString().getBytes(StandardCharsets.UTF_8));
-                String bootstrap="import os,base64\n_harness_temp=base64.b64decode('"+encodedTemp+"').decode('utf-8')\n"
-                        +"os.environ.update({k:_harness_temp for k in ('TEMP','TMP','USERPROFILE','APPDATA','LOCALAPPDATA')})\n";
+                String bootstrap="import os,base64,sys\nsys.dont_write_bytecode=True\n_harness_temp=base64.b64decode('"+encodedTemp+"').decode('utf-8')\n"
+                        +"os.environ.update({k:_harness_temp for k in ('TEMP','TMP','USERPROFILE','APPDATA','LOCALAPPDATA')})\n"
+                        +"sys.path.append(os.path.join(os.path.dirname(sys.executable),'Lib','site-packages'))\n";
                 String payload=Base64.getEncoder().encodeToString((bootstrap+"exec(compile(base64.b64decode('"
                         +Base64.getEncoder().encodeToString(script.getBytes(StandardCharsets.UTF_8))+"'),'<harness>','exec'))").getBytes(StandardCharsets.UTF_8));
                 String command='"'+shell+'"'+" -I -S -X utf8 -c \"import base64;exec(compile(base64.b64decode('"+payload+"'),'<harness>','exec'))\"";
@@ -94,9 +111,30 @@ final class WindowsIsolatedCommand {
                     env.setWideString(0,block.substring(0,block.length()-1));
                     return normalizePythonStartup(launch(shell,command,workspace,sid.getValue(),env,timeoutSeconds),runtime);
                 }
-            } finally {Security.API.FreeSid(sid.getValue());}
+            } finally {
+                try {
+                    if(scope!=null) {
+                        revokeProfile(profile,granted);
+                        lease.complete();
+                    }
+                } finally {Security.API.FreeSid(sid.getValue());}
+            }
         } catch(CodexException failure) {throw failure;}
         catch(Exception failure) {if(failure instanceof InterruptedException) Thread.currentThread().interrupt();throw new CodexException("Windows isolated command failed",failure);}
+    }
+
+    static void revokeProfile(String profile,java.util.List<Path> paths) {
+        var sid=new PointerByReference();
+        if(Userenv.API.DeriveAppContainerSidFromAppContainerName(profile,sid)!=0)
+            throw new CodexException("Cannot derive command isolation SID for cleanup");
+        try {
+            RuntimeException cleanupFailure=null;
+            for(Path path:paths.reversed()) try {grant(path,new WinNT.PSID(sid.getValue()),false,0);}
+            catch(RuntimeException failure) {if(cleanupFailure==null)cleanupFailure=failure;else cleanupFailure.addSuppressed(failure);}
+            if(cleanupFailure!=null)throw cleanupFailure;
+            int deleted=Userenv.API.DeleteAppContainerProfile(profile);
+            if(deleted!=0 && deleted!=0x80070002)throw new CodexException("Cannot delete command isolation profile: "+Integer.toHexString(deleted));
+        } finally {Security.API.FreeSid(sid.getValue());}
     }
 
     static Result normalizePythonStartup(Result result,Path runtime) {
@@ -191,7 +229,7 @@ final class WindowsIsolatedCommand {
         if(!path.toRealPath().equals(path) || !path.startsWith(workspace))throw new CodexException("Legacy metadata path cannot be a link");
         try(var pin=com.myharness.agent.workspace.WindowsWorkspaceHandles.pin(workspace,path)) {
             var acl=new PointerByReference();var descriptor=new PointerByReference();
-            int result=Advapi32.INSTANCE.GetNamedSecurityInfo(path.toString(),1,4,null,null,acl,null,descriptor);
+            int result=Advapi32.INSTANCE.GetNamedSecurityInfo(com.myharness.agent.workspace.WindowsWorkspaceHandles.nativePath(path),1,4,null,null,acl,null,descriptor);
             if(result!=0 || acl.getValue()==null)throw new CodexException("Cannot inspect legacy metadata ACL");
             boolean managed=false;
             try {
@@ -210,7 +248,7 @@ final class WindowsIsolatedCommand {
 
     private static synchronized void grant(Path path,WinNT.PSID sid,boolean denyWrite,int allowedMask) {
         var oldAcl=new PointerByReference();var descriptor=new PointerByReference();
-        int result=Advapi32.INSTANCE.GetNamedSecurityInfo(path.toString(),1,4,null,null,oldAcl,null,descriptor);
+        int result=Advapi32.INSTANCE.GetNamedSecurityInfo(com.myharness.agent.workspace.WindowsWorkspaceHandles.nativePath(path),1,4,null,null,oldAcl,null,descriptor);
         if(result!=0 || oldAcl.getValue()==null) throw new CodexException("Cannot inspect Workspace ACL: "+result);
         try {
             var old=new WinNT.ACL(oldAcl.getValue());old.read();
@@ -243,21 +281,21 @@ final class WindowsIsolatedCommand {
                 if(item.getByte(0)==1 && (item.getByte(1)&16)==0) continue;
                 check(Advapi32.INSTANCE.AddAce(acl,2,0xffffffff,item,Short.toUnsignedInt(item.getShort(2))),"copy Workspace ACL entry");
             }
-            result=Advapi32.INSTANCE.SetNamedSecurityInfo(path.toString(),1,4|(denyWrite?0x80000000:0),null,null,acl.getPointer(),null);
-            if(result!=0) throw new CodexException("Cannot apply Workspace isolation ACL: "+result);
+            result=Advapi32.INSTANCE.SetNamedSecurityInfo(com.myharness.agent.workspace.WindowsWorkspaceHandles.nativePath(path),1,4|(denyWrite?0x80000000:0),null,null,acl.getPointer(),null);
+            if(result!=0) throw new CodexException("Cannot apply isolation ACL to "+path+": "+result);
         } finally {Kernel32.INSTANCE.LocalFree(descriptor.getValue());}
     }
     private static void rejectHardLinks(Path root) {
         try {
             Files.walkFileTree(root,new java.nio.file.SimpleFileVisitor<>() {
                 @Override public java.nio.file.FileVisitResult preVisitDirectory(Path directory,java.nio.file.attribute.BasicFileAttributes attrs) {
-                    int attributes=Kernel32.INSTANCE.GetFileAttributes(directory.toString());
+                    int attributes=Kernel32.INSTANCE.GetFileAttributes(com.myharness.agent.workspace.WindowsWorkspaceHandles.nativePath(directory));
                     if(attributes==-1) throw new CodexException("Cannot inspect directory before granting isolation access");
                     return (attributes&0x400)!=0?java.nio.file.FileVisitResult.SKIP_SUBTREE:java.nio.file.FileVisitResult.CONTINUE;
                 }
                 @Override public java.nio.file.FileVisitResult visitFile(Path file,java.nio.file.attribute.BasicFileAttributes attrs) {
                     if(!attrs.isRegularFile()) return java.nio.file.FileVisitResult.CONTINUE;
-                    WinNT.HANDLE handle=Kernel32.INSTANCE.CreateFile(file.toString(),0x80,3,null,3,0x00200000,null);
+                    WinNT.HANDLE handle=Kernel32.INSTANCE.CreateFile(com.myharness.agent.workspace.WindowsWorkspaceHandles.nativePath(file),0x80,3,null,3,0x00200000,null);
                     check(handle!=null && !WinBase.INVALID_HANDLE_VALUE.equals(handle),"inspect Workspace file links");
                     try(var info=new Memory(24)) {
                         check(Kernel32.INSTANCE.GetFileInformationByHandleEx(handle,1,info,new WinDef.DWORD(24)),"inspect Workspace file links");

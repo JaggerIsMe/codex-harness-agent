@@ -30,7 +30,7 @@ class ResponsesHistoryCompatibilitySmokeTest {
     void switchesReasoningHistoryWithoutChangingThreadOrSource(boolean withExpertSkill,@TempDir Path workspace,@TempDir Path data) throws Exception {
         List<CodexSkillInput> skills=List.of();
         if(withExpertSkill) {
-            Path skill=Files.createDirectories(com.myharness.agent.workspace.AgentStorage.workspaceRoot(data,workspace).resolve("expert-runtimes/1/probe")).resolve("SKILL.md");
+            Path skill=Files.createDirectories(com.myharness.agent.workspace.AgentStorage.workspaceRoot(data,workspace).resolve("expert-runtimes/1/probe/skills/pkg")).resolve("SKILL.md");
             Files.writeString(skill,"---\nname: hello-skill\ndescription: Isolated provider switching regression fixture.\n---\nReply HISTORY_OK.\n");
             skills=List.of(new CodexSkillInput("hello-skill",skill.toRealPath().toString()));
         }

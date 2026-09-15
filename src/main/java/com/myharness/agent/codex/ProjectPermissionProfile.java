@@ -31,9 +31,26 @@ final class ProjectPermissionProfile {
         return policy;
     }
 
+    static ObjectNode policy(ObjectMapper json,java.nio.file.Path data,java.nio.file.Path workspace,SkillExecutionScope scope) {
+        if(scope==null)return policy(json,data,workspace);
+        var policy=policy(json);
+        var files=policy.withObject("filesystem");
+        // :root denies all private storage by default. Do not add an ancestor deny
+        // which could shadow the exact child grants on runtimes with deny precedence.
+        files.put(workspace.toAbsolutePath().normalize().toString(),"write");
+        files.put(scope.temporaryDirectory().toString(),"write");
+        scope.readableSkills().forEach(path->files.put(path.toString(),"read"));
+        return policy;
+    }
+
     static List<String> commandOverrides(ObjectMapper json,String name,java.nio.file.Path data,java.nio.file.Path workspace) {
         var result=new ArrayList<String>();
         flatten("permissions.\""+name+"\"",policy(json,data,workspace),result);
+        return result;
+    }
+    static List<String> commandOverrides(ObjectMapper json,String name,java.nio.file.Path data,java.nio.file.Path workspace,SkillExecutionScope scope) {
+        var result=new ArrayList<String>();
+        flatten("permissions.\""+name+"\"",policy(json,data,workspace,scope),result);
         return result;
     }
     static List<String> commandOverrides(ObjectMapper json,String name) {

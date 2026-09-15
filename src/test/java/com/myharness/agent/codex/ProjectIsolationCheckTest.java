@@ -31,7 +31,7 @@ class ProjectIsolationCheckTest {
     @Test void advertisesOnlyAfterSuccessfulProbeAndCleansFixtures() throws Exception {
         var properties=properties();
         probe(properties,0,true,false).initializeFor("Linux");
-        assertEquals("LINUX_PROJECT_PROFILE_V1",properties.isolationMode("Linux"));
+        assertEquals("LINUX_PROJECT_SKILL_V2",properties.isolationMode("Linux"));
         try(var files=Files.list(data)) {assertEquals(0,files.count());}
     }
 

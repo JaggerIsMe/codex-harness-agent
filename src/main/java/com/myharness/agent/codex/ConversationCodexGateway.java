@@ -47,7 +47,8 @@ public class ConversationCodexGateway implements CodexGateway {
                         || !Objects.equals(existing.options.getProjectId(),options.getProjectId()))
                     throw new CodexException("Loaded conversation runtime does not match its project or workspace");
                 boolean sameProcessRuntime=existing.options.getMcpRuntimeKey().equals(options.getMcpRuntimeKey())
-                        && Objects.equals(existing.options.getModelRuntimeKey(),options.getModelRuntimeKey());
+                        && Objects.equals(existing.options.getModelRuntimeKey(),options.getModelRuntimeKey())
+                        && Objects.equals(existing.options.getExpertRuntimeKey(),options.getExpertRuntimeKey());
                 if(!sameProcessRuntime) {
                     if(existing.active) throw new CodexException("Cannot update an active conversation runtime");
                     Entry replaced=existing;

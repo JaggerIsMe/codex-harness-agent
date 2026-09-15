@@ -1,7 +1,7 @@
 package com.myharness.agent.entity.dto;
 
 public class ExpertRuntimeDTO {
-    private int schemaVersion = 4;
+    private int schemaVersion = 5;
     private String runtimeKey;
     public String getRuntimeKey() { return runtimeKey; }
     public void setRuntimeKey(String value) { runtimeKey = value; }

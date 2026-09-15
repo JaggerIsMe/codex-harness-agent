@@ -27,7 +27,7 @@ class ExpertSkillTransportLifecycleTest {
         Path workspace = Files.createDirectory(root.resolve("project"));
         Path data = Files.createDirectory(root.resolve("data"));
         Path catalog=Files.writeString(root.resolve("local-models.json"),"{\"models\":[{\"slug\":\"local-probe\"}]}");
-        Path skill = Files.createDirectories(com.myharness.agent.workspace.AgentStorage.workspaceRoot(data,workspace).resolve("expert-runtimes/1/probe")).resolve("SKILL.md");
+        Path skill = Files.createDirectories(com.myharness.agent.workspace.AgentStorage.workspaceRoot(data,workspace).resolve("expert-runtimes/1/probe/skills/pkg")).resolve("SKILL.md");
         Files.writeString(skill, "---\nname: hello-skill\ndescription: Test fixture.\n---\nReply hello.\n");
         var skills = List.of(new CodexSkillInput("hello-skill", skill.toRealPath().toString()));
         String skillRoot = skill.getParent().getParent().toRealPath().toString();
@@ -72,7 +72,7 @@ class ExpertSkillTransportLifecycleTest {
                         result.putObject("activePermissionProfile").put("id", params.path("permissions").asText());
                     }
                     case "turn/start" -> {
-                        assertTrue(params.path("collaborationMode").path("settings").path("developer_instructions").asText().contains("Reply hello."));
+                        assertFalse(params.path("collaborationMode").path("settings").path("developer_instructions").asText().contains("Reply hello."));
                         assertFalse(params.path("collaborationMode").path("settings").path("developer_instructions").asText().contains(skills.getFirst().path()));
                         result.putObject("turn").put("id", "turn-probe");
                     }
@@ -81,7 +81,11 @@ class ExpertSkillTransportLifecycleTest {
                 return result;
             }
         }) {
-            if (resume) adapter.resumeThread(threadId, options);
+            if (resume) {
+                Path markers=Files.createDirectories(data.resolve("skill-readonly-threads-v1"));
+                Files.writeString(markers.resolve(UUID.nameUUIDFromBytes(threadId.getBytes(java.nio.charset.StandardCharsets.UTF_8))+".txt"),workspace.toRealPath().toString());
+                adapter.resumeThread(threadId, options);
+            }
             else assertEquals(threadId, adapter.startThread(options));
             assertEquals("turn-probe", adapter.startTurn(threadId,
                     new CodexTurnInput("hello").withExpert("", skills), mock(CodexEventListener.class)));

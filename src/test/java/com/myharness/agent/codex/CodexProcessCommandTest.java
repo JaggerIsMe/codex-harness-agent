@@ -61,8 +61,8 @@ class CodexProcessCommandTest {
         var properties=new com.myharness.agent.config.AgentProperties();
         assertEquals("UNSUPPORTED",properties.isolationMode("Linux"));
         properties.confirmReadIsolation();
-        assertEquals("LINUX_PROJECT_PROFILE_V1",properties.isolationMode("Linux"));
-        assertEquals("WINDOWS_LPAC_V1",properties.isolationMode("Windows 11"));
+        assertEquals("LINUX_PROJECT_SKILL_V2",properties.isolationMode("Linux"));
+        assertEquals("WINDOWS_LPAC_SKILL_V2",properties.isolationMode("Windows 11"));
         properties.setStrictProjectIsolation(false);
         assertEquals("UNSUPPORTED",properties.isolationMode("Linux"));
     }
